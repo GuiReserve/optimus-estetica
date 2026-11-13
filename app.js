@@ -16,6 +16,7 @@ class Component extends DCLogic {
       clients: saved.clients || [],
       services: saved.services || [],
       appts: saved.appts || [],
+      expenses: saved.expenses || [], ef: { id: '', name: '', amount: '', day: '' }, efErr: '', finPeriod: 'mes',
       tpl: Object.assign({}, this._defaultTpl(), saved.tpl || {}),
       cf: this._emptyCF(), sf: this._emptySF(), af: this._emptyAF(),
       search: '', agFilter: 'abertos', notifOpen: true, confirmDel: '',
@@ -27,7 +28,7 @@ class Component extends DCLogic {
     var s = this.state;
     try {
       window.localStorage.setItem('studio-estetica-v1', JSON.stringify({
-        auth: s.auth, studio: s.studio, clients: s.clients, services: s.services, appts: s.appts, tpl: s.tpl
+        auth: s.auth, studio: s.studio, clients: s.clients, services: s.services, appts: s.appts, tpl: s.tpl, expenses: s.expenses
       }));
     } catch (e) {}
   }
@@ -158,6 +159,18 @@ class Component extends DCLogic {
       return { appts: st.appts.map(function (a) { return a.id === id ? Object.assign({}, a, typeof patch === 'function' ? patch(a) : patch) : a; }) };
     });
   }
+  saveExpense() {
+    var s = this.state, f = s.ef;
+    if (!f.name.trim()) return this.setState({ efErr: 'Informe a descrição do gasto.' });
+    if (f.amount === '' || isNaN(Number(f.amount)) || Number(f.amount) <= 0) return this.setState({ efErr: 'Informe o valor mensal.' });
+    var day = Math.min(31, Math.max(0, parseInt(f.day, 10) || 0));
+    var data = { name: f.name.trim(), amount: Number(f.amount), day: day };
+    var list = s.expenses || [];
+    var expenses = f.id
+      ? list.map(function (x) { return x.id === f.id ? Object.assign({}, x, data) : x; })
+      : list.concat([Object.assign({ id: this._uid() }, data)]);
+    this.setState({ expenses: expenses, ef: { id: '', name: '', amount: '', day: '' }, efErr: '' });
+  }
   markBday(id) {
     var y = new Date().getFullYear();
     this.setState(function (st) { return { clients: st.clients.map(function (c) { return c.id === id ? Object.assign({}, c, { bdaySent: y }) : c; }) }; });
@@ -235,7 +248,8 @@ class Component extends DCLogic {
       { id: 'clientes', label: 'Clientes', badge: 0 },
       { id: 'agenda', label: 'Agenda', badge: agBadge },
       { id: 'servicos', label: 'Serviços', badge: 0 },
-      { id: 'aniversarios', label: 'Aniversários', badge: bdayBadge }
+      { id: 'aniversarios', label: 'Aniversários', badge: bdayBadge },
+      { id: 'financas', label: 'Finanças', badge: 0 }
     ];
     var tabs = tabDefs.map(function (t) {
       return { label: t.label, badge: t.badge, hasBadge: t.badge > 0, cls: s.tab === t.id ? 'tab tab-on' : 'tab',
@@ -339,6 +353,78 @@ class Component extends DCLogic {
         send: function () { if (d === 0) self.markBday(c.id); } };
     });
 
+    /* finances */
+    var finP = s.finPeriod || 'mes';
+    var nowY = now.getFullYear(), nowM = now.getMonth();
+    var prevYm = this._iso(new Date(nowY, nowM - 1, 1)).slice(0, 7);
+    var inPeriod = function (d) {
+      if (finP === 'mes') return d.slice(0, 7) === ym;
+      if (finP === 'anterior') return d.slice(0, 7) === prevYm;
+      if (finP === 'ano') return d.slice(0, 4) === String(nowY);
+      return true;
+    };
+    var doneP = s.appts.filter(function (a) { return a.done && inPeriod(a.date); });
+    var revenue = doneP.reduce(function (t, a) { return t + (Number(a.price) || 0); }, 0);
+    var months = 1;
+    if (finP === 'ano') months = nowM + 1;
+    if (finP === 'tudo') {
+      var first = s.appts.reduce(function (m, a) { return a.date < m ? a.date : m; }, today);
+      var fd = this._parse(first);
+      months = Math.max(1, (nowY - fd.getFullYear()) * 12 + nowM - fd.getMonth() + 1);
+    }
+    var expList = (s.expenses || []).slice().sort(function (a, b) { return (a.day || 99) - (b.day || 99); });
+    var expMonthly = expList.reduce(function (t, x) { return t + (Number(x.amount) || 0); }, 0);
+    var expTotal = expMonthly * months;
+    var profit = revenue - expTotal;
+    var bySvc = {};
+    doneP.forEach(function (a) {
+      var k = a.serviceId || a.serviceName;
+      var sv = sById[a.serviceId];
+      if (!bySvc[k]) bySvc[k] = { name: sv ? sv.name : (a.serviceName || 'Serviço removido'), count: 0, total: 0 };
+      bySvc[k].count++; bySvc[k].total += Number(a.price) || 0;
+    });
+    var svcRows = Object.keys(bySvc).map(function (k) { return bySvc[k]; }).sort(function (a, b) { return b.total - a.total; });
+    var svcMax = svcRows.length ? svcRows[0].total || 1 : 1;
+    var byCli = {};
+    doneP.forEach(function (a) {
+      var c = cById[a.clientId];
+      var k = a.clientId;
+      if (!byCli[k]) byCli[k] = { name: c ? c.name : (a.clientName || 'Cliente removida'), count: 0, total: 0 };
+      byCli[k].count++; byCli[k].total += Number(a.price) || 0;
+    });
+    var cliRows = Object.keys(byCli).map(function (k) { return byCli[k]; }).sort(function (a, b) { return b.total - a.total; }).slice(0, 5);
+    var periodNames = { mes: 'Este mês', anterior: 'Mês anterior', ano: 'Este ano', tudo: 'Todo o período' };
+    var fin = {
+      periodLabel: periodNames[finP] + (months > 1 ? ' · ' + months + ' meses' : ''),
+      revenue: this._money(revenue), count: doneP.length,
+      countLabel: doneP.length === 1 ? '1 atendimento realizado' : doneP.length + ' atendimentos realizados',
+      ticket: this._money(doneP.length ? revenue / doneP.length : 0),
+      expTotal: this._money(expTotal), expMonthly: this._money(expMonthly),
+      expNote: months > 1 ? this._money(expMonthly) + ' por mês × ' + months + ' meses' : 'gastos fixos do mês',
+      profit: this._money(profit), profitCls: profit < 0 ? 'serif neg' : 'serif',
+      profitNote: revenue > 0 ? 'margem de ' + Math.round(profit / revenue * 100) + '%' : 'receita menos gastos fixos',
+      noSvc: svcRows.length === 0, noCli: cliRows.length === 0, noExp: expList.length === 0,
+      svcRows: svcRows.map(function (r) {
+        return { name: r.name, total: self._money(r.total), countLabel: r.count === 1 ? '1 atendimento' : r.count + ' atendimentos',
+          share: revenue ? Math.round(r.total / revenue * 100) + '%' : '0%', barW: Math.max(2, Math.round(r.total / svcMax * 100)) + '%' };
+      }),
+      cliRows: cliRows.map(function (r, i) {
+        return { pos: i + 1, name: r.name, initials: self._initials(r.name), total: self._money(r.total),
+          countLabel: r.count === 1 ? '1 atendimento' : r.count + ' atendimentos' };
+      }),
+      expRows: expList.map(function (x) {
+        return { name: x.name, amount: self._money(x.amount), dayLabel: x.day ? 'vence dia ' + x.day : 'sem vencimento',
+          edit: function () { self.setState({ ef: { id: x.id, name: x.name, amount: String(x.amount), day: x.day ? String(x.day) : '' }, efErr: '' }); },
+          askDel: function () { self.setState({ confirmDel: x.id }); },
+          del: function () { self.setState(function (st) { return { expenses: (st.expenses || []).filter(function (y) { return y.id !== x.id; }), confirmDel: '' }; }); },
+          confirming: s.confirmDel === x.id, notConfirming: s.confirmDel !== x.id };
+      })
+    };
+    var finFilters = [['mes', 'Este mês'], ['anterior', 'Mês anterior'], ['ano', 'Este ano'], ['tudo', 'Tudo']].map(function (f) {
+      return { label: f[1], cls: finP === f[0] ? 'pill pill-on' : 'pill', go: function () { self.setState({ finPeriod: f[0] }); } };
+    });
+    on.efName = this._bind('ef', 'name'); on.efAmount = this._bind('ef', 'amount'); on.efDay = this._bind('ef', 'day');
+
     var firstClient = s.clients[0];
     var isSetup = !s.auth;
 
@@ -355,7 +441,11 @@ class Component extends DCLogic {
       notifOpen: s.notifOpen, toggleNotif: function () { self.setState({ notifOpen: !self.state.notifOpen }); },
       cancelDel: function () { self.setState({ confirmDel: '' }); },
 
-      tabClientes: s.tab === 'clientes', tabAgenda: s.tab === 'agenda', tabServicos: s.tab === 'servicos', tabAniversarios: s.tab === 'aniversarios',
+      tabClientes: s.tab === 'clientes', tabAgenda: s.tab === 'agenda', tabServicos: s.tab === 'servicos', tabAniversarios: s.tab === 'aniversarios', tabFinancas: s.tab === 'financas',
+      fin: fin, finFilters: finFilters, ef: s.ef, efErr: s.efErr, hasEfErr: !!s.efErr, efEditing: !!s.ef.id,
+      efTitle: s.ef.id ? 'Editar gasto' : 'Novo gasto fixo',
+      saveExpense: function () { self.saveExpense(); },
+      cancelExpense: function () { self.setState({ ef: { id: '', name: '', amount: '', day: '' }, efErr: '' }); },
 
       cf: s.cf, cfErr: s.cfErr, hasCfErr: !!s.cfErr, cfEditing: !!s.cf.id, cfTitle: s.cf.id ? 'Editar cliente' : 'Nova cliente',
       saveClient: function () { self.saveClient(); },
@@ -678,6 +768,96 @@ function viewAniversarios(v) {
   </div>`;
 }
 
+function viewFinancas(v) {
+  const f = v.fin;
+  const kpi = (k, n, d, cls) => html`<div class="card" style="padding:20px"><span class="kicker">${k}</span><div class=${cls || 'serif'} style="font-size:36px">${n}</div><span class="muted" style="font-size:13px">${d}</span></div>`;
+  return html`
+  <div style="display:flex;flex-direction:column;gap:24px">
+    <div style="display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:12px">
+      <div><span class="kicker">${f.periodLabel}</span><h2 class="serif" style="font-size:36px">Finanças</h2></div>
+      <div role="group" aria-label="Período" style="display:flex;flex-wrap:wrap;gap:6px">
+        ${v.finFilters.map((x) => html`<button type="button" class=${x.cls} onClick=${x.go}>${x.label}</button>`)}
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px">
+      ${kpi('Receita total', f.revenue, f.countLabel)}
+      ${kpi('Gastos fixos', f.expTotal, f.expNote)}
+      ${kpi('Lucro estimado', f.profit, f.profitNote, f.profitCls)}
+      ${kpi('Ticket médio', f.ticket, 'por atendimento realizado')}
+    </div>
+    <div style=${ROW2}>
+      <section class="card" style="flex:1 1 420px">
+        <div style="padding-bottom:16px"><span class="kicker">Serviços realizados</span><h3 class="serif" style="font-size:28px">Receita por serviço</h3></div>
+        ${f.noSvc && html`<p class="muted" style=${EMPTY}>Nenhum serviço marcado como feito neste período.</p>`}
+        ${f.svcRows.map((r) => html`
+          <div style="display:flex;flex-direction:column;gap:8px;padding:14px 0;border-top:1px solid #F0E9E4">
+            <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:8px">
+              <span style="font-size:15px;font-weight:500">${r.name}</span>
+              <span style="font-size:15px;font-weight:500">${r.total}</span>
+            </div>
+            <div class="bar"><span style=${{ width: r.barW }}></span></div>
+            <span class="muted" style="font-size:13px">${r.countLabel} · ${r.share} da receita</span>
+          </div>`)}
+      </section>
+      <section class="card" style="flex:1 1 360px">
+        <div style="padding-bottom:16px"><span class="kicker">Quem mais investe</span><h3 class="serif" style="font-size:28px">Top clientes</h3></div>
+        ${f.noCli && html`<p class="muted" style=${EMPTY}>Nenhum atendimento realizado neste período.</p>`}
+        ${f.cliRows.map((r) => html`
+          <div class="row">
+            <span class="serif" style="width:20px;font-size:22px;color:#6B5F58">${r.pos}</span>
+            <span class="av" aria-hidden="true">${r.initials}</span>
+            <div style="flex:1 1 140px;min-width:0;display:flex;flex-direction:column;gap:2px">
+              <span style="font-size:15px;font-weight:500">${r.name}</span>
+              <span class="muted" style="font-size:13px">${r.countLabel}</span>
+            </div>
+            <span style="font-size:15px;font-weight:500">${r.total}</span>
+          </div>`)}
+      </section>
+    </div>
+    <div style=${ROW2}>
+      <section class="card" style=${FORMCARD}>
+        <div><span class="kicker">Cadastro</span><h3 class="serif" style="font-size:28px">${v.efTitle}</h3></div>
+        <label class="lbl">Descrição
+          <input class="in" value=${v.ef.name} onInput=${v.on.efName} placeholder="Ex.: Aluguel, energia, produtos" />
+        </label>
+        <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px">
+          <label class="lbl">Valor mensal (R$)<input class="in" type="number" min="0" step="0.01" value=${v.ef.amount} onInput=${v.on.efAmount} placeholder="0,00" /></label>
+          <label class="lbl">Dia de vencimento<input class="in" type="number" min="1" max="31" value=${v.ef.day} onInput=${v.on.efDay} placeholder="Opcional" /></label>
+        </div>
+        ${v.hasEfErr && html`<p class="err" role="alert">${v.efErr}</p>`}
+        <div style="display:flex;flex-wrap:wrap;gap:8px">
+          <button type="button" class="btn" onClick=${v.saveExpense} style="flex:1 1 auto">Salvar gasto</button>
+          ${v.efEditing && html`<button type="button" class="btn btn-line" onClick=${v.cancelExpense}>Cancelar</button>`}
+        </div>
+      </section>
+      <section class="card" style="flex:999 1 540px">
+        <div style="display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:12px;padding-bottom:16px">
+          <div><span class="kicker">Todo mês</span><h3 class="serif" style="font-size:28px">Gastos fixos</h3></div>
+          <span style="font-size:15px">Total mensal: <strong>${f.expMonthly}</strong></span>
+        </div>
+        ${f.noExp && html`<p class="muted" style=${EMPTY}>Nenhum gasto fixo cadastrado. Adicione aluguel, contas, produtos e outros custos mensais.</p>`}
+        ${f.expRows.map((x) => html`
+          <div class="row">
+            <div style="flex:1 1 200px;min-width:0;display:flex;flex-direction:column;gap:2px">
+              <span style="font-size:15px;font-weight:500">${x.name}</span>
+              <span class="muted" style="font-size:13px">${x.dayLabel}</span>
+            </div>
+            <span style="font-size:15px;font-weight:500">${x.amount}</span>
+            ${x.notConfirming
+              ? html`<div style="display:flex;gap:6px">
+                  <button type="button" class="btn btn-line btn-sm btn-icon" onClick=${x.edit} aria-label="Editar gasto">${IconEdit}</button>
+                  <button type="button" class="btn btn-line btn-sm btn-icon" onClick=${x.askDel} aria-label="Excluir gasto">${IconTrash}</button>
+                </div>`
+              : html`<div style="display:flex;gap:6px;align-items:center">
+                  <button type="button" class="btn btn-danger btn-sm" onClick=${x.del}>Excluir</button>
+                  <button type="button" class="btn btn-line btn-sm" onClick=${v.cancelDel}>Não</button>
+                </div>`}
+          </div>`)}
+      </section>
+    </div>
+  </div>`;
+}
+
 function view(v) {
   if (v.showAuth) return viewAuth(v);
   return html`
@@ -703,6 +883,7 @@ function view(v) {
       ${v.tabAgenda && viewAgenda(v)}
       ${v.tabServicos && viewServicos(v)}
       ${v.tabAniversarios && viewAniversarios(v)}
+      ${v.tabFinancas && viewFinancas(v)}
     </main>
   </div>`;
 }
@@ -753,7 +934,7 @@ class App extends Component {
     const auth = store && store.auth ? store.auth : (this.legacy ? { user: this.legacy.auth.user, legacy: true } : null);
     Object.assign(this.state, {
       auth, logged: false, busy: false, loginErr: '',
-      clients: [], services: [], appts: [], studio: 'Optimus', tpl: this._defaultTpl()
+      clients: [], services: [], appts: [], expenses: [], studio: 'Optimus', tpl: this._defaultTpl()
     });
   }
 
@@ -769,7 +950,7 @@ class App extends Component {
     ['pointerdown', 'keydown', 'scroll', 'touchstart'].forEach((ev) => window.removeEventListener(ev, this._touch));
   }
 
-  _pickData(s) { return { studio: s.studio, clients: s.clients, services: s.services, appts: s.appts, tpl: s.tpl }; }
+  _pickData(s) { return { studio: s.studio, clients: s.clients, services: s.services, appts: s.appts, tpl: s.tpl, expenses: s.expenses }; }
 
   componentDidUpdate() {
     if (!this.key || !this.state.logged) return;
@@ -795,7 +976,7 @@ class App extends Component {
     this.key = null;
     this.setState({
       logged: false, busy: false, loginErr: msg || '', lf: { user: '', pass: '', pass2: '' },
-      clients: [], services: [], appts: [], cf: this._emptyCF(), sf: this._emptySF(), af: this._emptyAF(),
+      clients: [], services: [], appts: [], expenses: [], cf: this._emptyCF(), sf: this._emptySF(), af: this._emptyAF(),
       search: '', confirmDel: '', tab: 'clientes'
     });
   }
@@ -835,7 +1016,7 @@ class App extends Component {
         const src = this.legacy || {};
         const data = {
           studio: src.studio && src.studio !== 'Studio Estética' ? src.studio : 'Optimus',
-          clients: src.clients || [], services: src.services || [], appts: src.appts || [],
+          clients: src.clients || [], services: src.services || [], appts: src.appts || [], expenses: src.expenses || [],
           tpl: Object.assign({}, this._defaultTpl(), src.tpl || {})
         };
         const box = await seal(key, data);
@@ -879,7 +1060,7 @@ class App extends Component {
     this.key = key;
     this.lastActive = Date.now();
     this.setState(Object.assign({ logged: true, busy: false, loginErr: '', lf: { user: '', pass: '', pass2: '' } }, {
-      studio: data.studio || 'Optimus', clients: data.clients || [], services: data.services || [], appts: data.appts || [],
+      studio: data.studio || 'Optimus', clients: data.clients || [], services: data.services || [], appts: data.appts || [], expenses: data.expenses || [],
       tpl: Object.assign({}, this._defaultTpl(), data.tpl || {})
     }));
   }

@@ -1,6 +1,6 @@
 # Optimus Estética
 
-Sistema minimalista para studio de estética: login, cadastro de clientes com aniversário, agenda com check de serviço feito, cadastro de serviços e avisos com mensagens prontas no WhatsApp (parabéns, confirmação de agendamento e acompanhamento pós-serviço).
+Sistema minimalista para studio de estética: login, cadastro de clientes com aniversário, agenda com check de serviço feito, cadastro de serviços, finanças (receita total, receita por serviço, top clientes, gastos fixos e lucro) e avisos com mensagens prontas no WhatsApp (parabéns, confirmação de agendamento e acompanhamento pós-serviço).
 
 ## Como usar
 Publicado no GitHub Pages: https://guireserve.github.io/optimus-estetica/ — também funciona no Vercel (headers extras em `vercel.json`). No primeiro acesso, crie seu usuário e senha.
