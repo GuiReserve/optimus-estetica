@@ -3,7 +3,7 @@
 Sistema minimalista para studio de estética: login, cadastro de clientes com aniversário, agenda com check de serviço feito, cadastro de serviços e avisos com mensagens prontas no WhatsApp (parabéns, confirmação de agendamento e acompanhamento pós-serviço).
 
 ## Como usar
-Publique a pasta em uma hospedagem estática (Vercel recomendado: os headers de segurança estão em `vercel.json`). No primeiro acesso, crie seu usuário e senha.
+Publicado no GitHub Pages: https://guireserve.github.io/optimus-estetica/ — também funciona no Vercel (headers extras em `vercel.json`). No primeiro acesso, crie seu usuário e senha.
 
 ## Segurança
 - **Senha forte obrigatória**: mínimo 8 caracteres, com letras e números. A senha nunca é armazenada.
