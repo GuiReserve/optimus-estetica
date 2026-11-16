@@ -1192,6 +1192,17 @@ class AdminPanel extends PreactComponent {
     this.setState({ busy: false, copied: false, cred: { studio: a.studio_name, owner: a.owner_name, phone: a.phone, user: data.username || a.username, pass: data.temp_password, isNew: false } });
     this.load();
   }
+  async copy(key, text, inputId) {
+    let ok = false;
+    try { await navigator.clipboard.writeText(text); ok = true; } catch (e) { ok = false; }
+    if (!ok) {
+      // Alternativa para navegadores que bloqueiam a área de transferência: seleciona o texto para copiar manualmente.
+      const el = document.getElementById(inputId);
+      if (el) { el.focus(); el.select(); try { ok = document.execCommand('copy'); } catch (e) { ok = false; } }
+    }
+    this.setState({ copied: ok ? key : 'manual-' + key });
+    clearTimeout(this._copyT); this._copyT = setTimeout(() => this.setState({ copied: false }), 2500);
+  }
   credText(c) {
     return 'Olá' + (c.owner ? ', ' + c.owner.split(' ')[0] : '') + '! ' + (c.isNew ? 'Seu acesso ao Optimus está pronto.' : 'Geramos uma nova senha para seu acesso ao Optimus.') +
       '\n\nSite: ' + SITE_URL + '\nUsuário: ' + c.user + '\nSenha provisória: ' + c.pass + '\n\nNo primeiro acesso você vai criar sua própria senha.';
@@ -1234,9 +1245,21 @@ class AdminPanel extends PreactComponent {
         ${c && html`<section class="card" style="border-color:#7F4F43;display:flex;flex-direction:column;gap:14px">
           <div><span class="kicker">${c.isNew ? 'Acesso criado' : 'Nova senha gerada'}</span><h2 class="serif" style="font-size:28px">${c.studio}</h2>
             <p class="muted" style="font-size:13px">Envie estes dados para o cliente. A senha provisória só aparece agora; no primeiro acesso ele cria a própria senha.</p></div>
-          <div style="background:#F6F2EE;border-radius:12px;padding:16px;font-size:15px;line-height:1.7;white-space:pre-wrap;word-break:break-all">${this.credText(c)}</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px">
+            ${[['user', 'Usuário', c.user, 'cred-user'], ['pass', 'Senha provisória', c.pass, 'cred-pass']].map(([k, label, val, id]) => html`
+              <div style="background:#F6F2EE;border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;gap:8px">
+                <label class="kicker" for=${id}>${label}</label>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <input id=${id} class="in" readonly value=${val} onFocus=${(e) => e.target.select()} style="flex:1;min-width:0;font-size:20px;font-weight:500;letter-spacing:.04em;background:#fff" />
+                  <button type="button" class="btn btn-sm" style="min-height:44px" onClick=${() => this.copy(k, val, id)}>${s.copied === k ? 'Copiado!' : 'Copiar'}</button>
+                </div>
+                ${s.copied === 'manual-' + k && html`<span class="muted" style="font-size:12px">Texto selecionado: use Ctrl+C (ou Copiar no celular).</span>`}
+              </div>`)}
+          </div>
+          <div style="background:#F6F2EE;border-radius:12px;padding:16px;font-size:15px;line-height:1.7;white-space:pre-wrap;word-break:break-word">${this.credText(c)}</div>
+          <textarea id="cred-msg" readonly aria-hidden="true" tabindex="-1" style="position:absolute;left:-9999px;width:1px;height:1px">${this.credText(c)}</textarea>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
-            <button type="button" class="btn" onClick=${() => { try { navigator.clipboard.writeText(this.credText(c)); this.setState({ copied: true }); } catch (e) { /* ignore */ } }}>${s.copied ? 'Copiado!' : 'Copiar mensagem'}</button>
+            <button type="button" class="btn" onClick=${() => this.copy('msg', this.credText(c), 'cred-msg')}>${s.copied === 'msg' ? 'Copiado!' : 'Copiar mensagem completa'}</button>
             ${waHref && html`<a class="btn btn-wa" href=${waHref} target="_blank" rel="noopener">${IconWa()} Enviar no WhatsApp</a>`}
             <button type="button" class="btn btn-line" onClick=${() => this.setState({ cred: null })}>Fechar</button>
           </div>
