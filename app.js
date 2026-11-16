@@ -430,6 +430,17 @@ class Component extends DCLogic {
         return { pos: i + 1, name: r.name, initials: self._initials(r.name), total: self._money(r.total),
           countLabel: r.count === 1 ? '1 atendimento' : r.count + ' atendimentos' };
       }),
+      doneCount: doneP.length === 1 ? '1 atendimento' : doneP.length + ' atendimentos', noDone: doneP.length === 0,
+      doneRows: doneP.slice().sort(function (a, b) { return (b.date + b.time).localeCompare(a.date + a.time); }).map(function (a) {
+        var c = cById[a.clientId], sv = sById[a.serviceId], key = 'fin-' + a.id;
+        return { wd: self._wd(a.date), day: self._dm(a.date), time: a.time,
+          client: c ? c.name : (a.clientName || 'Cliente removida'), service: sv ? sv.name : (a.serviceName || 'Serviço removido'),
+          price: self._money(a.price),
+          undo: function () { self.patchAppt(a.id, { done: false, followed: false }); },
+          askDel: function () { self.setState({ confirmDel: key }); },
+          del: function () { self.setState(function (st) { return { appts: st.appts.filter(function (x) { return x.id !== a.id; }), confirmDel: '' }; }); },
+          confirming: s.confirmDel === key, notConfirming: s.confirmDel !== key };
+      }),
       expRows: expList.map(function (x) {
         return { name: x.name, amount: self._money(x.amount), dayLabel: x.day ? 'vence dia ' + x.day : 'sem vencimento',
           edit: function () { self.setState({ ef: { id: x.id, name: x.name, amount: String(x.amount), day: x.day ? String(x.day) : '' }, efErr: '' }); },
@@ -714,7 +725,7 @@ function viewAgenda(v) {
               ${a.showFollowWa && html`<a class="btn btn-wa btn-sm" href=${a.followHref} target="_blank" rel="noopener" onClick=${a.follow}>Acompanhar</a>`}
               ${a.showFollowNoWa && html`<button type="button" class="btn btn-soft btn-sm" onClick=${a.follow}>Marcar acompanhado</button>`}
               ${a.notConfirming
-                ? html`<button type="button" class="btn btn-line btn-sm btn-icon" onClick=${a.askDel} aria-label="Excluir agendamento">${IconTrash}</button>`
+                ? html`<button type="button" class="btn btn-line btn-sm btn-icon" onClick=${a.askDel} aria-label="Excluir agendamento" title="Excluir agendamento">${IconTrash}</button>`
                 : html`<button type="button" class="btn btn-danger btn-sm" onClick=${a.del}>Excluir</button><button type="button" class="btn btn-line btn-sm" onClick=${v.cancelDel}>Não</button>`}
             </div>
           </div>`)}
@@ -833,6 +844,37 @@ function viewFinancas(v) {
           </div>`)}
       </section>
     </div>
+    <section class="card">
+      <div style="padding-bottom:16px">
+        <span class="kicker">${f.doneCount} no período</span>
+        <h3 class="serif" style="font-size:28px">Atendimentos realizados</h3>
+        <p class="muted" style="font-size:13px;padding-top:4px">Estes atendimentos entram no faturamento. Lançou algum por engano ou como teste? Desmarque como feito ou exclua.</p>
+      </div>
+      ${f.noDone && html`<p class="muted" style=${EMPTY}>Nenhum atendimento realizado neste período.</p>`}
+      ${f.doneRows.map((d) => html`
+        <div class="row">
+          <div style="width:68px;flex:none;display:flex;flex-direction:column;align-items:center;padding:8px 0;border-radius:12px;background:#F6F2EE">
+            <span class="kicker" style="font-size:11px">${d.wd}</span>
+            <span class="serif" style="font-size:22px;line-height:1.1">${d.day}</span>
+            <span style="font-size:13px">${d.time}</span>
+          </div>
+          <div style="flex:1 1 200px;min-width:0;display:flex;flex-direction:column;gap:2px">
+            <span style="font-size:15px;font-weight:500">${d.client}</span>
+            <span class="muted" style="font-size:13px">${d.service}</span>
+          </div>
+          <span style="font-size:15px;font-weight:500">${d.price}</span>
+          ${d.notConfirming
+            ? html`<div style="display:flex;gap:6px">
+                <button type="button" class="btn btn-line btn-sm" onClick=${d.undo}>Desmarcar feito</button>
+                <button type="button" class="btn btn-line btn-sm btn-icon" onClick=${d.askDel} aria-label="Excluir atendimento">${IconTrash}</button>
+              </div>`
+            : html`<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                <span style="font-size:13px">Excluir este atendimento?</span>
+                <button type="button" class="btn btn-danger btn-sm" onClick=${d.del}>Excluir</button>
+                <button type="button" class="btn btn-line btn-sm" onClick=${v.cancelDel}>Não</button>
+              </div>`}
+        </div>`)}
+    </section>
     <div style=${ROW2}>
       <section class="card" style=${FORMCARD}>
         <div><span class="kicker">Cadastro</span><h3 class="serif" style="font-size:28px">${v.efTitle}</h3></div>
