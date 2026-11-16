@@ -5,18 +5,19 @@ Sistema minimalista para studio de estética: login, cadastro de clientes com an
 ## Como usar
 Publicado no GitHub Pages: https://guireserve.github.io/optimus-estetica/ — também funciona no Vercel (headers extras em `vercel.json`). No primeiro acesso, crie seu usuário e senha.
 
-## Segurança
-- **Senha forte obrigatória**: mínimo 8 caracteres, com letras e números. A senha nunca é armazenada.
-- **Dados criptografados**: clientes, agenda, serviços e mensagens ficam salvos com AES-256-GCM; a chave é derivada da senha com PBKDF2-SHA256 (310 mil iterações, sal aleatório).
-- **Proteção contra tentativas**: 5 senhas erradas bloqueiam o login por 5 minutos.
-- **Trava automática**: a sessão bloqueia após 15 minutos sem uso; ao sair, os dados saem da memória.
-- **Headers de proteção** (`vercel.json`): Content-Security-Policy restrita, HSTS, X-Frame-Options, nosniff, Referrer-Policy, Permissions-Policy, noindex.
-- **Sem CDN de scripts**: a biblioteca (Preact + htm) está em `vendor/`.
+## Contas e acesso (Supabase)
+- **Painel do administrador**: cria o acesso de cada studio (nome, responsável, e-mail, WhatsApp, plano, mensalidade, vencimento), gera senha provisória, renova (+1 mês), bloqueia/libera e gera nova senha. Não existe exclusão: contas são só bloqueadas.
+- **Login dos studios**: e-mail e senha; troca obrigatória da senha provisória no primeiro acesso; "Esqueci minha senha" com link por e-mail.
+- **Vencimento**: quando a data "pago até" passa, o studio perde o acesso automaticamente até ser renovado. Os dados ficam guardados.
+- **Dados na nuvem**: cada studio só lê e grava os próprios dados (Row Level Security). O administrador não vê os dados dos studios.
+- **Histórico**: cada salvamento guarda a versão anterior em `studio_data_history` (cópia de segurança).
+- **Importação**: dados antigos salvos no navegador são importados no primeiro login e continuam no aparelho como cópia.
 
-## Limitações
-- Os dados ficam no navegador do aparelho em uso e não sincronizam entre aparelhos.
-- Esqueceu a senha? Não há recuperação: os dados criptografados não podem ser lidos sem ela.
-- Para uso em vários aparelhos com recuperação de senha, é preciso um backend (ex.: Supabase).
+Banco: `supabase/migrations/001_optimus_schema.sql` · Função de servidor: `supabase/functions/admin-users`.
+
+## Segurança
+- Senhas com no mínimo 8 caracteres, letras e números; gerenciadas pelo Supabase Auth.
+- Content-Security-Policy restrita (no `index.html` e em `vercel.json`), sem scripts de CDN (bibliotecas em `vendor/`).
 
 ## Licenças de terceiros
-`vendor/htm-preact.module.js`: htm (Apache-2.0) e Preact (MIT).
+`vendor/htm-preact.module.js`: htm (Apache-2.0) e Preact (MIT). `vendor/supabase.js`: supabase-js (MIT).

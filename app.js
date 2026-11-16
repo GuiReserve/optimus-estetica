@@ -984,192 +984,448 @@ function view(v) {
   </div>`;
 }
 
-/* ================= Segurança =================
- * - Senha nunca é guardada: deriva-se uma chave AES-256 com PBKDF2-SHA256 (310 mil iterações, sal aleatório).
- * - Todos os dados (clientes, agenda, serviços, mensagens) ficam criptografados com AES-GCM no aparelho.
- * - Senha errada = a descriptografia falha. 5 tentativas erradas bloqueiam o login por 5 minutos.
- * - Sessão trava sozinha após 15 minutos sem uso; ao sair, os dados saem da memória.
- */
-const STORE_KEY = 'optimus-v2';
-const LEGACY_KEY = 'studio-estetica-v1';
-const ITER = 310000;
-const IDLE_MS = 15 * 60 * 1000;
-const MAX_TRIES = 5;
-const LOCK_MS = 5 * 60 * 1000;
-const te = new TextEncoder();
-const td = new TextDecoder();
-const b64 = (u8) => { let s = ''; u8.forEach((b) => { s += String.fromCharCode(b); }); return btoa(s); };
-const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+/* ================= Nuvem (Supabase): login, contas e dados ================= */
+const SB_URL = 'https://zyflcdxpysbbnaxjwgol.supabase.co';
+const SB_KEY = 'sb_publishable_b-FadwYCRsau11TDXEOZcQ_mstZJsRG';
+const SITE_URL = location.origin + location.pathname;
+const sb = window.supabase.createClient(SB_URL, SB_KEY, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } });
 
-async function deriveKey(pass, salt, iter) {
+const pwOk = (p) => p.length >= 8 && /[A-Za-z]/.test(p) && /[0-9]/.test(p);
+const PW_RULE = 'A senha precisa ter pelo menos 8 caracteres, com letras e números.';
+const emailOk = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+const fmtBR = (iso) => { if (!iso) return '—'; const p = iso.split('-'); return p[2] + '/' + p[1] + '/' + p[0]; };
+const todayISO = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
+const addMonth = (iso) => { const p = iso.split('-').map(Number); const d = new Date(p[0], p[1], p[2]); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
+const moneyBR = (v) => (Number(v) || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+const authErr = (e) => {
+  const m = (e && e.message) || '';
+  if (/invalid login|invalid credentials/i.test(m)) return 'E-mail ou senha incorretos.';
+  if (/rate limit|too many/i.test(m)) return 'Muitas tentativas. Aguarde alguns minutos e tente novamente.';
+  if (/same.*password|different from the old/i.test(m)) return 'A nova senha precisa ser diferente da atual.';
+  if (/weak|pwned|leaked/i.test(m)) return 'Essa senha é fraca ou já vazou em outros sites. Escolha outra.';
+  return m || 'Não foi possível concluir. Tente novamente.';
+};
+async function fnError(error) {
+  try { const j = await error.context.json(); return j.error || error.message; } catch (e) { return (error && error.message) || 'Erro inesperado.'; }
+}
+
+/* --- leitura dos dados antigos salvos neste aparelho (nunca são apagados) --- */
+const te = new TextEncoder(), td = new TextDecoder();
+const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+async function openLocalV2(pass) {
+  const st = JSON.parse(localStorage.getItem('optimus-v2') || 'null');
+  if (!st || !st.auth || !st.data) return null;
   const base = await crypto.subtle.importKey('raw', te.encode(pass), 'PBKDF2', false, ['deriveKey']);
-  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: iter, hash: 'SHA-256' }, base,
-    { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
-}
-async function seal(key, obj) {
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, te.encode(JSON.stringify(obj))));
-  return { iv: b64(iv), ct: b64(ct) };
-}
-async function unseal(key, box) {
-  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(box.iv) }, key, unb64(box.ct));
+  const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', salt: unb64(st.auth.salt), iterations: st.auth.iter || 310000, hash: 'SHA-256' },
+    base, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(st.data.iv) }, key, unb64(st.data.ct));
   return JSON.parse(td.decode(pt));
 }
-function readStore() { try { return JSON.parse(localStorage.getItem(STORE_KEY) || 'null'); } catch (e) { return null; } }
-function writeStore(v) { try { localStorage.setItem(STORE_KEY, JSON.stringify(v)); return true; } catch (e) { return false; } }
+function localDataKind() {
+  try {
+    if (localStorage.getItem('optimus-v2')) return 'v2';
+    const v1 = JSON.parse(localStorage.getItem('studio-estetica-v1') || 'null');
+    if (v1 && ((v1.clients || []).length || (v1.appts || []).length || (v1.services || []).length)) return 'v1';
+  } catch (e) { /* ignore */ }
+  return '';
+}
 
-class App extends Component {
+/* ================= App do studio (dados na nuvem) ================= */
+class StudioApp extends Component {
   constructor(props) {
     super(props);
-    const store = readStore();
-    let legacy = null;
-    try { legacy = JSON.parse(localStorage.getItem(LEGACY_KEY) || 'null'); } catch (e) { legacy = null; }
-    this.legacy = !store && legacy && legacy.auth ? legacy : null;
-    this.key = null;
-    this.lastActive = Date.now();
-    const auth = store && store.auth ? store.auth : (this.legacy ? { user: this.legacy.auth.user, legacy: true } : null);
+    const d = props.initial || {};
+    this.version = props.version || 0;
     Object.assign(this.state, {
-      auth, logged: false, busy: false, loginErr: '',
-      clients: [], services: [], appts: [], expenses: [], studio: 'Optimus', tpl: this._defaultTpl()
+      auth: { user: props.email }, logged: true,
+      studio: d.studio || props.studioName || 'Optimus',
+      clients: d.clients || [], services: d.services || [], appts: d.appts || [],
+      expenses: d.expenses || [], quick: d.quick || this._defaultQuick(),
+      tpl: Object.assign({}, this._defaultTpl(), d.tpl || {}),
+      syncMsg: '', importKind: (d.clients || []).length || (d.appts || []).length ? '' : localDataKind(),
+      importOpen: false, importPass: '', importErr: '', importBusy: false
     });
+    this.dirty = false;
   }
-
+  _pickData(s) { return { studio: s.studio, clients: s.clients, services: s.services, appts: s.appts, tpl: s.tpl, expenses: s.expenses, quick: s.quick }; }
   componentDidMount() {
-    this._touch = () => { this.lastActive = Date.now(); };
-    ['pointerdown', 'keydown', 'scroll', 'touchstart'].forEach((ev) => window.addEventListener(ev, this._touch, { passive: true }));
-    this._idle = setInterval(() => {
-      if (this.state.logged && Date.now() - this.lastActive > IDLE_MS) this.lock('Sessão bloqueada por inatividade. Entre novamente.');
-    }, 20000);
+    this._flush = () => { if (this.dirty) this.save(); };
+    window.addEventListener('pagehide', this._flush);
+    document.addEventListener('visibilitychange', this._flush);
   }
   componentWillUnmount() {
-    clearInterval(this._idle);
-    ['pointerdown', 'keydown', 'scroll', 'touchstart'].forEach((ev) => window.removeEventListener(ev, this._touch));
+    window.removeEventListener('pagehide', this._flush);
+    document.removeEventListener('visibilitychange', this._flush);
+    clearTimeout(this._t);
   }
-
-  _pickData(s) { return { studio: s.studio, clients: s.clients, services: s.services, appts: s.appts, tpl: s.tpl, expenses: s.expenses, quick: s.quick }; }
-
-  componentDidUpdate() {
-    if (!this.key || !this.state.logged) return;
-    clearTimeout(this._saveT);
-    this._saveT = setTimeout(() => this.save(), 250);
+  componentDidUpdate(prevProps, prevState) {
+    const keys = ['studio', 'clients', 'services', 'appts', 'tpl', 'expenses', 'quick'];
+    if (!keys.some((k) => prevState[k] !== this.state[k])) return;
+    if (this._applyingRemote) { this._applyingRemote = false; return; }
+    this.dirty = true;
+    clearTimeout(this._t);
+    this._t = setTimeout(() => this.save(), 700);
   }
-
-  save() {
-    const key = this.key;
-    if (!key) return Promise.resolve();
-    const data = this._pickData(this.state);
-    return seal(key, data).then((box) => {
-      const st = readStore();
-      if (!st) return;
-      st.data = box;
-      writeStore(st);
-    });
-  }
-
-  lock(msg) {
-    clearTimeout(this._saveT);
-    if (this.key && this.state.logged) this.save();
-    this.key = null;
-    this.setState({
-      logged: false, busy: false, loginErr: msg || '', lf: { user: '', pass: '', pass2: '' },
-      clients: [], services: [], appts: [], expenses: [], cf: this._emptyCF(), sf: this._emptySF(), af: this._emptyAF(),
-      search: '', confirmDel: '', tab: 'clientes'
-    });
-  }
-
-  async doAuth() {
-    const s = this.state;
-    if (s.busy) return;
-    const u = s.lf.user.trim();
-    const p = s.lf.pass;
-    const st = readStore();
-
-    if (st && st.lock && Date.now() < st.lock.until) {
-      const min = Math.ceil((st.lock.until - Date.now()) / 60000);
-      return this.setState({ loginErr: 'Muitas tentativas erradas. Tente novamente em ' + min + ' min.' });
-    }
-
-    // Primeiro acesso ou migração da versão antiga: cria senha forte e criptografa tudo.
-    if (!s.auth || s.auth.legacy) {
-      if (s.auth && s.auth.legacy) {
-        const old = this.legacy.auth;
-        if (u.toLowerCase() !== String(old.user).toLowerCase() || this._hash(p) !== old.hash) {
-          return this.setState({ loginErr: 'Usuário ou senha incorretos.' });
+  async save() {
+    if (this._saving) { this._again = true; return; }
+    this._saving = true; this.dirty = false;
+    const { data, error } = await sb.rpc('save_studio_data', { p_data: this._pickData(this.state), p_version: this.version });
+    this._saving = false;
+    if (error) {
+      if (/conflito_versao/.test(error.message)) {
+        const r = await sb.from('studio_data').select('data, version').single();
+        if (r.data) {
+          this.version = r.data.version;
+          this._applyingRemote = true;
+          const d = r.data.data || {};
+          this.setState({ syncMsg: 'Os dados foram alterados em outro aparelho e foram atualizados aqui. Confira sua última alteração.',
+            clients: d.clients || [], services: d.services || [], appts: d.appts || [], expenses: d.expenses || [],
+            quick: d.quick || this._defaultQuick(), tpl: Object.assign({}, this._defaultTpl(), d.tpl || {}), studio: d.studio || this.state.studio });
         }
-        if (p.length < 8) {
-          return this.setState({ loginErr: 'Por segurança, a senha agora precisa de pelo menos 8 caracteres. Crie uma nova abaixo.', auth: null });
-        }
+      } else if (/conta_inativa/.test(error.message)) {
+        this.props.onRefresh();
       } else {
-        if (!u) return this.setState({ loginErr: 'Escolha um nome de usuário.' });
-        if (p.length < 8) return this.setState({ loginErr: 'A senha precisa ter pelo menos 8 caracteres.' });
-        if (!/[A-Za-z]/.test(p) || !/[0-9]/.test(p)) return this.setState({ loginErr: 'Use letras e números na senha.' });
-        if (p !== s.lf.pass2) return this.setState({ loginErr: 'As senhas não coincidem.' });
+        this.dirty = true;
+        this.setState({ syncMsg: 'Sem conexão: não foi possível salvar agora. Tentaremos de novo automaticamente.' });
+        clearTimeout(this._t); this._t = setTimeout(() => this.save(), 5000);
       }
-      this.setState({ busy: true, loginErr: '' });
-      try {
-        const salt = crypto.getRandomValues(new Uint8Array(16));
-        const key = await deriveKey(p, salt, ITER);
-        const src = this.legacy || {};
-        const data = {
-          studio: src.studio && src.studio !== 'Studio Estética' ? src.studio : 'Optimus',
-          clients: src.clients || [], services: src.services || [], appts: src.appts || [], expenses: src.expenses || [], quick: src.quick || this._defaultQuick(),
-          tpl: Object.assign({}, this._defaultTpl(), src.tpl || {})
-        };
-        const box = await seal(key, data);
-        if (!writeStore({ v: 2, auth: { user: u, salt: b64(salt), iter: ITER }, data: box, lock: { n: 0, until: 0 } })) {
-          return this.setState({ busy: false, loginErr: 'Não foi possível salvar neste navegador (modo privado?).' });
-        }
-        try { localStorage.removeItem(LEGACY_KEY); } catch (e) { /* ignore */ }
-        this.legacy = null;
-        this.key = key;
-        this.lastActive = Date.now();
-        this.setState(Object.assign({ auth: { user: u }, logged: true, busy: false, loginErr: '', lf: { user: '', pass: '', pass2: '' } }, data));
-      } catch (e) {
-        this.setState({ busy: false, loginErr: 'Este navegador não suporta a criptografia necessária. Atualize o navegador.' });
-      }
-      return;
+    } else {
+      this.version = data;
+      if (this.state.syncMsg && /conexão/.test(this.state.syncMsg)) this.setState({ syncMsg: '' });
     }
-
-    // Login normal: a senha só é aceita se conseguir descriptografar os dados.
-    this.setState({ busy: true, loginErr: '' });
-    let data = null, key = null;
-    try {
-      if (u.toLowerCase() === String(st.auth.user).toLowerCase()) {
-        key = await deriveKey(p, unb64(st.auth.salt), st.auth.iter || ITER);
-        data = await unseal(key, st.data);
-      }
-    } catch (e) { data = null; }
-
-    const fresh = readStore() || st;
-    if (!data) {
-      const lock = fresh.lock || { n: 0, until: 0 };
-      lock.n = (lock.n || 0) + 1;
-      let msg = 'Usuário ou senha incorretos.';
-      if (lock.n >= MAX_TRIES) { lock.until = Date.now() + LOCK_MS; lock.n = 0; msg = 'Muitas tentativas erradas. Login bloqueado por 5 minutos.'; }
-      else msg += ' Restam ' + (MAX_TRIES - lock.n) + ' tentativa(s).';
-      fresh.lock = lock;
-      writeStore(fresh);
-      return this.setState({ busy: false, loginErr: msg });
-    }
-    fresh.lock = { n: 0, until: 0 };
-    writeStore(fresh);
-    this.key = key;
-    this.lastActive = Date.now();
-    this.setState(Object.assign({ logged: true, busy: false, loginErr: '', lf: { user: '', pass: '', pass2: '' } }, {
-      studio: data.studio || 'Optimus', clients: data.clients || [], services: data.services || [], appts: data.appts || [], expenses: data.expenses || [], quick: data.quick || this._defaultQuick(),
-      tpl: Object.assign({}, this._defaultTpl(), data.tpl || {})
-    }));
+    if (this._again) { this._again = false; this.save(); }
   }
-
+  async doImport() {
+    this.setState({ importBusy: true, importErr: '' });
+    let d = null;
+    try {
+      if (this.state.importKind === 'v2') d = await openLocalV2(this.state.importPass);
+      else d = JSON.parse(localStorage.getItem('studio-estetica-v1') || 'null');
+    } catch (e) { d = null; }
+    if (!d) return this.setState({ importBusy: false, importErr: 'Senha antiga incorreta. Use a senha que você usava neste aparelho antes.' });
+    this.setState({
+      importBusy: false, importOpen: false, importKind: '', importPass: '',
+      syncMsg: 'Dados importados para a nuvem. Eles também continuam guardados neste aparelho como cópia de segurança.',
+      clients: d.clients || [], services: d.services || [], appts: d.appts || [], expenses: d.expenses || [],
+      quick: d.quick || this.state.quick, tpl: Object.assign({}, this._defaultTpl(), d.tpl || {}),
+      studio: d.studio && d.studio !== 'Studio Estética' ? d.studio : this.state.studio
+    });
+  }
   render() {
     const v = this.renderVals();
-    v.logout = () => this.lock('');
-    if (v.isSetup) v.authSubtitle = 'Primeiro acesso: crie seu usuário e uma senha com no mínimo 8 caracteres, letras e números.';
-    if (this.state.auth && this.state.auth.legacy) v.authSubtitle = 'Entre com sua senha atual para ativar a criptografia dos dados.';
-    if (this.state.busy) v.authBtn = 'Verificando…';
-    v.busy = this.state.busy;
-    return view(v);
+    v.logout = async () => { clearTimeout(this._t); if (this.dirty) await this.save(); this.props.onLogout(); };
+    const s = this.state;
+    const banner = html`
+      ${s.syncMsg && html`<div style="max-width:1180px;margin:16px auto 0;padding:0 24px"><div class="card" role="status" style="padding:14px 18px;display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap"><span style="font-size:14px">${s.syncMsg}</span><button type="button" class="btn btn-line btn-sm" onClick=${() => this.setState({ syncMsg: '' })}>Ok</button></div></div>`}
+      ${s.importKind && html`<div style="max-width:1180px;margin:16px auto 0;padding:0 24px"><div class="card" style="padding:18px 20px;display:flex;flex-direction:column;gap:12px">
+        <div style="display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap">
+          <div><strong style="font-weight:500">Encontramos dados salvos neste aparelho.</strong><div class="muted" style="font-size:14px">Importe para a nuvem e acesse de qualquer aparelho. Nada é apagado daqui.</div></div>
+          ${!s.importOpen && html`<div style="display:flex;gap:8px"><button type="button" class="btn" onClick=${() => (s.importKind === 'v1' ? this.doImport() : this.setState({ importOpen: true }))}>Importar dados</button><button type="button" class="btn btn-line" onClick=${() => this.setState({ importKind: '' })}>Agora não</button></div>`}
+        </div>
+        ${s.importOpen && html`<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+          <label class="lbl" style="flex:1 1 240px">Senha antiga deste aparelho<input class="in" type="password" value=${s.importPass} onInput=${(e) => this.setState({ importPass: e.target.value })} /></label>
+          <button type="button" class="btn" disabled=${s.importBusy} onClick=${() => this.doImport()}>${s.importBusy ? 'Importando…' : 'Importar'}</button>
+        </div>`}
+        ${s.importErr && html`<p class="err" role="alert">${s.importErr}</p>`}
+      </div></div>`}`;
+    const page = view(v);
+    return html`<div>${banner}${page}</div>`;
   }
 }
 
-render(html`<${App} />`, document.getElementById('app'));
+/* ================= Painel do administrador ================= */
+const emptyAdminForm = () => ({ id: '', studio_name: '', owner_name: '', email: '', phone: '', plan: 'Mensal', monthly_fee: '', paid_until: addMonth(todayISO()), notes: '' });
+
+class AdminPanel extends PreactComponent {
+  constructor(props) {
+    super(props);
+    this.state = { accounts: [], loading: true, form: emptyAdminForm(), err: '', busy: false, cred: null, q: '', filter: 'todos', confirm: '', copied: false };
+  }
+  componentDidMount() { this.load(); }
+  async load() {
+    const { data, error } = await sb.from('accounts').select('*').order('created_at', { ascending: false });
+    this.setState({ accounts: data || [], loading: false, err: error ? 'Não foi possível carregar as contas.' : '' });
+  }
+  set(k) { return (e) => { const v = e.target.value; this.setState((st) => ({ form: Object.assign({}, st.form, { [k]: v }) })); }; }
+  async submit() {
+    const f = this.state.form;
+    if (!f.studio_name.trim()) return this.setState({ err: 'Informe o nome do studio.' });
+    if (!f.id && !emailOk(f.email.trim())) return this.setState({ err: 'Informe um e-mail válido.' });
+    this.setState({ busy: true, err: '' });
+    if (f.id) {
+      const { error } = await sb.from('accounts').update({
+        studio_name: f.studio_name.trim(), owner_name: f.owner_name.trim() || null, phone: f.phone.trim() || null,
+        plan: f.plan.trim() || 'Mensal', monthly_fee: Number(f.monthly_fee) || 0, paid_until: f.paid_until || null,
+        notes: f.notes.trim() || null, updated_at: new Date().toISOString()
+      }).eq('id', f.id);
+      this.setState({ busy: false, err: error ? 'Não foi possível salvar.' : '', form: error ? f : emptyAdminForm() });
+      return this.load();
+    }
+    const { data, error } = await sb.functions.invoke('admin-users', { body: Object.assign({ action: 'create' }, f, { monthly_fee: Number(f.monthly_fee) || 0 }) });
+    if (error) return this.setState({ busy: false, err: await fnError(error) });
+    this.setState({ busy: false, form: emptyAdminForm(), copied: false,
+      cred: { studio: data.account.studio_name, owner: data.account.owner_name, phone: data.account.phone, email: data.account.email, pass: data.temp_password, isNew: true } });
+    this.load();
+  }
+  async patch(id, values) {
+    const { error } = await sb.from('accounts').update(Object.assign({ updated_at: new Date().toISOString() }, values)).eq('id', id);
+    if (error) this.setState({ err: 'Não foi possível atualizar a conta.' });
+    this.setState({ confirm: '' });
+    this.load();
+  }
+  async reset(a) {
+    this.setState({ busy: true, err: '', confirm: '' });
+    const { data, error } = await sb.functions.invoke('admin-users', { body: { action: 'reset', account_id: a.id } });
+    if (error) return this.setState({ busy: false, err: await fnError(error) });
+    this.setState({ busy: false, copied: false, cred: { studio: a.studio_name, owner: a.owner_name, phone: a.phone, email: data.email, pass: data.temp_password, isNew: false } });
+    this.load();
+  }
+  credText(c) {
+    return 'Olá' + (c.owner ? ', ' + c.owner.split(' ')[0] : '') + '! ' + (c.isNew ? 'Seu acesso ao Optimus está pronto.' : 'Geramos uma nova senha para seu acesso ao Optimus.') +
+      '\n\nSite: ' + SITE_URL + '\nE-mail: ' + c.email + '\nSenha provisória: ' + c.pass + '\n\nNo primeiro acesso você vai criar sua própria senha.';
+  }
+  render() {
+    const s = this.state, f = s.form, today = todayISO();
+    const in7 = (() => { const d = new Date(); d.setDate(d.getDate() + 7); return d.toISOString().slice(0, 10); })();
+    const rows = s.accounts.map((a) => {
+      const expired = a.paid_until && a.paid_until < today;
+      const active = a.status === 'ativo' && !expired;
+      const soon = active && a.paid_until && a.paid_until <= in7;
+      return Object.assign({}, a, { expired, active, soon,
+        statusLabel: a.status === 'bloqueado' ? 'Bloqueado' : expired ? 'Vencido' : soon ? 'Vence em breve' : 'Ativo',
+        statusCls: a.status === 'bloqueado' ? 'chip chip-done' : expired ? 'chip chip-wait' : soon ? 'chip chip-wait' : 'chip chip-ok' });
+    });
+    const q = s.q.trim().toLowerCase();
+    const shown = rows.filter((a) => (!q || (a.studio_name + ' ' + (a.owner_name || '') + ' ' + a.email).toLowerCase().includes(q)) &&
+      (s.filter === 'todos' || (s.filter === 'ativos' && a.active) || (s.filter === 'vencidos' && a.expired && a.status === 'ativo') || (s.filter === 'bloqueados' && a.status === 'bloqueado')));
+    const activeRows = rows.filter((a) => a.active);
+    const stat = (k, n, d) => html`<div class="card" style="padding:20px"><span class="kicker">${k}</span><div class="serif" style="font-size:36px">${n}</div><span class="muted" style="font-size:13px">${d}</span></div>`;
+    const filters = [['todos', 'Todos'], ['ativos', 'Ativos'], ['vencidos', 'Vencidos'], ['bloqueados', 'Bloqueados']];
+    const c = s.cred;
+    const waHref = c && c.phone ? (() => { let d = c.phone.replace(/\D/g, ''); if (d.length <= 11) d = '55' + d; return 'https://wa.me/' + d + '?text=' + encodeURIComponent(this.credText(c)); })() : '';
+    return html`
+    <div style="min-height:100vh">
+      <header style="background:#fff;border-bottom:1px solid #ECE4DE">
+        <div style="max-width:1180px;margin:0 auto;padding:14px 24px;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px">
+          <div style="display:flex;align-items:baseline;gap:12px"><span class="serif" style="font-size:30px;line-height:1">Optimus</span><span class="kicker">Administração</span></div>
+          <button type="button" class="btn btn-line btn-sm" onClick=${this.props.onLogout} style="min-height:44px">${IconOut} Sair</button>
+        </div>
+      </header>
+      <main style="max-width:1180px;margin:0 auto;padding:28px 24px 64px;display:flex;flex-direction:column;gap:24px">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px">
+          ${stat('Clientes ativos', activeRows.length, 'studios com acesso liberado')}
+          ${stat('Receita mensal', moneyBR(activeRows.reduce((t, a) => t + Number(a.monthly_fee || 0), 0)), 'soma das mensalidades ativas')}
+          ${stat('Vencem em 7 dias', rows.filter((a) => a.soon).length, 'renove para não bloquear')}
+          ${stat('Vencidos ou bloqueados', rows.filter((a) => !a.active).length, 'sem acesso no momento')}
+        </div>
+
+        ${c && html`<section class="card" style="border-color:#7F4F43;display:flex;flex-direction:column;gap:14px">
+          <div><span class="kicker">${c.isNew ? 'Acesso criado' : 'Nova senha gerada'}</span><h2 class="serif" style="font-size:28px">${c.studio}</h2>
+            <p class="muted" style="font-size:13px">Envie estes dados para o cliente. A senha provisória só aparece agora; no primeiro acesso ele cria a própria senha.</p></div>
+          <div style="background:#F6F2EE;border-radius:12px;padding:16px;font-size:15px;line-height:1.7;white-space:pre-wrap;word-break:break-all">${this.credText(c)}</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button type="button" class="btn" onClick=${() => { try { navigator.clipboard.writeText(this.credText(c)); this.setState({ copied: true }); } catch (e) { /* ignore */ } }}>${s.copied ? 'Copiado!' : 'Copiar mensagem'}</button>
+            ${waHref && html`<a class="btn btn-wa" href=${waHref} target="_blank" rel="noopener">${IconWa()} Enviar no WhatsApp</a>`}
+            <button type="button" class="btn btn-line" onClick=${() => this.setState({ cred: null })}>Fechar</button>
+          </div>
+        </section>`}
+
+        <div style=${ROW2}>
+          <section class="card" style=${FORMCARD}>
+            <div><span class="kicker">${f.id ? 'Editar' : 'Novo cliente'}</span><h2 class="serif" style="font-size:30px">${f.id ? 'Editar acesso' : 'Criar acesso'}</h2></div>
+            <label class="lbl">Nome do studio<input class="in" value=${f.studio_name} onInput=${this.set('studio_name')} placeholder="Ex.: Studio Bella" /></label>
+            <label class="lbl">Responsável<input class="in" value=${f.owner_name} onInput=${this.set('owner_name')} placeholder="Nome da dona do studio" /></label>
+            <label class="lbl">E-mail de acesso<input class="in" type="email" value=${f.email} onInput=${this.set('email')} disabled=${!!f.id} placeholder="cliente@email.com" /></label>
+            <label class="lbl">WhatsApp<input class="in" type="tel" value=${f.phone} onInput=${this.set('phone')} placeholder="(11) 98888-7777" /></label>
+            <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px">
+              <label class="lbl">Plano<input class="in" value=${f.plan} onInput=${this.set('plan')} placeholder="Mensal" /></label>
+              <label class="lbl">Mensalidade (R$)<input class="in" type="number" min="0" step="0.01" value=${f.monthly_fee} onInput=${this.set('monthly_fee')} placeholder="0,00" /></label>
+            </div>
+            <label class="lbl">Pago até<input class="in" type="date" value=${f.paid_until} onInput=${this.set('paid_until')} /></label>
+            <label class="lbl">Observações<textarea class="in" value=${f.notes} onInput=${this.set('notes')} style="min-height:80px"></textarea></label>
+            ${s.err && html`<p class="err" role="alert">${s.err}</p>`}
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button type="button" class="btn" disabled=${s.busy} onClick=${() => this.submit()} style="flex:1 1 auto">${s.busy ? 'Salvando…' : f.id ? 'Salvar alterações' : 'Criar acesso'}</button>
+              ${f.id && html`<button type="button" class="btn btn-line" onClick=${() => this.setState({ form: emptyAdminForm(), err: '' })}>Cancelar</button>`}
+            </div>
+          </section>
+
+          <section class="card" style="flex:999 1 560px">
+            <div style="display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:12px;padding-bottom:16px">
+              <div><span class="kicker">${rows.length === 1 ? '1 cliente' : rows.length + ' clientes'}</span><h2 class="serif" style="font-size:30px">Acessos</h2></div>
+              <label class="lbl" style="flex:0 1 260px">Buscar<input class="in" type="search" value=${s.q} onInput=${(e) => this.setState({ q: e.target.value })} placeholder="Studio, nome ou e-mail" /></label>
+            </div>
+            <div role="group" aria-label="Filtro" style="display:flex;flex-wrap:wrap;gap:6px;padding-bottom:12px">
+              ${filters.map((x) => html`<button type="button" class=${s.filter === x[0] ? 'pill pill-on' : 'pill'} onClick=${() => this.setState({ filter: x[0] })}>${x[1]}</button>`)}
+            </div>
+            ${s.loading && html`<p class="muted" style=${EMPTY}>Carregando…</p>`}
+            ${!s.loading && !shown.length && html`<p class="muted" style=${EMPTY}>Nenhum acesso por aqui ainda. Crie o primeiro no formulário ao lado.</p>`}
+            ${shown.map((a) => html`
+              <div class="row">
+                <span class="av" aria-hidden="true">${(a.studio_name || '?').slice(0, 2)}</span>
+                <div style="flex:1 1 220px;min-width:0;display:flex;flex-direction:column;gap:2px">
+                  <span style="font-size:16px;font-weight:500">${a.studio_name}</span>
+                  <span class="muted" style="font-size:13px;word-break:break-all">${a.owner_name ? a.owner_name + ' · ' : ''}${a.email}</span>
+                  <span class="muted" style="font-size:13px">${a.plan} · ${moneyBR(a.monthly_fee)} · pago até ${fmtBR(a.paid_until)}</span>
+                </div>
+                <span class=${a.statusCls}>${a.statusLabel}</span>
+                ${s.confirm === a.id
+                  ? html`<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                      <span style="font-size:13px">${a.status === 'bloqueado' ? 'Liberar acesso?' : 'Bloquear acesso?'}</span>
+                      <button type="button" class="btn btn-sm ${a.status === 'bloqueado' ? '' : 'btn-danger'}" onClick=${() => this.patch(a.id, { status: a.status === 'bloqueado' ? 'ativo' : 'bloqueado' })}>Confirmar</button>
+                      <button type="button" class="btn btn-line btn-sm" onClick=${() => this.setState({ confirm: '' })}>Não</button>
+                    </div>`
+                  : html`<div style="display:flex;gap:6px;flex-wrap:wrap">
+                      <button type="button" class="btn btn-soft btn-sm" onClick=${() => this.patch(a.id, { status: 'ativo', paid_until: addMonth(a.paid_until && a.paid_until > today ? a.paid_until : today) })}>Renovar +1 mês</button>
+                      <button type="button" class="btn btn-line btn-sm" onClick=${() => this.setState({ confirm: a.id })}>${a.status === 'bloqueado' ? 'Liberar' : 'Bloquear'}</button>
+                      <button type="button" class="btn btn-line btn-sm" disabled=${s.busy} onClick=${() => this.reset(a)}>Nova senha</button>
+                      <button type="button" class="btn btn-line btn-sm btn-icon" aria-label="Editar acesso" onClick=${() => this.setState({ err: '', form: { id: a.id, studio_name: a.studio_name || '', owner_name: a.owner_name || '', email: a.email, phone: a.phone || '', plan: a.plan || 'Mensal', monthly_fee: String(a.monthly_fee ?? ''), paid_until: a.paid_until || '', notes: a.notes || '' } })}>${IconEdit}</button>
+                    </div>`}
+              </div>`)}
+          </section>
+        </div>
+      </main>
+    </div>`;
+  }
+}
+
+/* ================= Raiz: rotas de autenticação ================= */
+class Root extends PreactComponent {
+  constructor(props) {
+    super(props);
+    this.state = { screen: 'loading', email: '', pass: '', pass2: '', err: '', info: '', busy: false, acct: null, data: null, version: 0, userEmail: '' };
+  }
+  componentDidMount() {
+    sb.auth.onAuthStateChange((event) => {
+      if (event === 'PASSWORD_RECOVERY') this.setState({ screen: 'recovery', err: '', info: '', pass: '', pass2: '' });
+      if (event === 'SIGNED_OUT') this.setState({ screen: 'login', acct: null, data: null });
+    });
+    this.route();
+  }
+  async route(info) {
+    if (this.state.screen === 'recovery') return;
+    const { data: { session } } = await sb.auth.getSession();
+    if (!session) {
+      const { data: hasAdmin } = await sb.rpc('admin_exists');
+      return this.setState({ screen: hasAdmin === false ? 'setup' : 'login', busy: false, info: info || '' });
+    }
+    const { data: rows, error } = await sb.rpc('my_account');
+    const acct = rows && rows[0];
+    if (error || !acct) return this.setState({ screen: 'noaccount', busy: false, userEmail: session.user.email });
+    if (acct.must_change_password && !acct.is_admin) return this.setState({ screen: 'change', acct, busy: false, pass: '', pass2: '', err: '' });
+    if (acct.is_admin && !acct.id) return this.setState({ screen: 'admin', acct, busy: false });
+    if (!acct.active) return this.setState({ screen: 'blocked', acct, busy: false });
+    const { data: sd } = await sb.from('studio_data').select('data, version').maybeSingle();
+    this.setState({ screen: 'studio', acct, data: (sd && sd.data) || {}, version: (sd && sd.version) || 0, busy: false, userEmail: session.user.email });
+  }
+  async login() {
+    const email = this.state.email.trim().toLowerCase();
+    if (!emailOk(email) || !this.state.pass) return this.setState({ err: 'Informe seu e-mail e sua senha.' });
+    this.setState({ busy: true, err: '', info: '' });
+    const { error } = await sb.auth.signInWithPassword({ email, password: this.state.pass });
+    if (error) return this.setState({ busy: false, err: authErr(error) });
+    this.setState({ pass: '' });
+    this.route();
+  }
+  async forgot() {
+    const email = this.state.email.trim().toLowerCase();
+    if (!emailOk(email)) return this.setState({ err: 'Informe o e-mail da sua conta.' });
+    this.setState({ busy: true, err: '' });
+    const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: SITE_URL });
+    this.setState({ busy: false, err: error ? authErr(error) : '', info: error ? '' : 'Se este e-mail tiver uma conta, você vai receber um link para criar uma nova senha. Confira também a caixa de spam.' });
+  }
+  async newPassword(fromRecovery) {
+    const { pass, pass2 } = this.state;
+    if (!pwOk(pass)) return this.setState({ err: PW_RULE });
+    if (pass !== pass2) return this.setState({ err: 'As senhas não coincidem.' });
+    this.setState({ busy: true, err: '' });
+    const { error } = await sb.auth.updateUser({ password: pass });
+    if (error) return this.setState({ busy: false, err: authErr(error) });
+    await sb.rpc('password_changed');
+    if (fromRecovery) history.replaceState(null, '', SITE_URL);
+    this.setState({ screen: 'loading', pass: '', pass2: '' });
+    this.route();
+  }
+  async setup() {
+    const email = this.state.email.trim().toLowerCase();
+    const { pass, pass2 } = this.state;
+    if (!emailOk(email)) return this.setState({ err: 'Informe um e-mail válido.' });
+    if (!pwOk(pass)) return this.setState({ err: PW_RULE });
+    if (pass !== pass2) return this.setState({ err: 'As senhas não coincidem.' });
+    this.setState({ busy: true, err: '' });
+    const { error } = await sb.functions.invoke('admin-users', { body: { action: 'bootstrap', email, password: pass } });
+    if (error) return this.setState({ busy: false, err: await fnError(error) });
+    const r = await sb.auth.signInWithPassword({ email, password: pass });
+    if (r.error) return this.setState({ busy: false, err: authErr(r.error) });
+    this.setState({ pass: '', pass2: '' });
+    this.route();
+  }
+  async logout() {
+    await sb.auth.signOut();
+    this.setState({ screen: 'login', acct: null, data: null, email: '', pass: '', err: '', info: '' });
+  }
+  card(kicker, title, sub, body) {
+    return html`<main style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px">
+      <div class="card" style="width:100%;max-width:420px;padding:40px;display:flex;flex-direction:column;gap:18px">
+        <div style="display:flex;flex-direction:column;gap:6px;text-align:center">
+          <span class="kicker">${kicker}</span>
+          <h1 class="serif" style="font-size:40px;line-height:1.05">${title}</h1>
+          ${sub && html`<p class="muted" style="font-size:15px">${sub}</p>`}
+        </div>
+        ${body}
+        ${this.state.err && html`<p class="err" role="alert">${this.state.err}</p>`}
+        ${this.state.info && html`<p role="status" style="font-size:14px;color:#2F5A3E;background:#E3EDE6;border-radius:10px;padding:10px 12px">${this.state.info}</p>`}
+      </div></main>`;
+  }
+  render() {
+    const s = this.state;
+    const set = (k) => (e) => this.setState({ [k]: e.target.value });
+    const enter = (fn) => (e) => { if (e.key === 'Enter') fn(); };
+    const link = (label, fn) => html`<button type="button" onClick=${fn} style="background:none;border:0;padding:8px;font:inherit;font-size:14px;color:#7F4F43;text-decoration:underline;cursor:pointer;align-self:center">${label}</button>`;
+    const pwFields = (onEnter) => html`
+      <label class="lbl">Nova senha<input class="in" type="password" autocomplete="new-password" value=${s.pass} onInput=${set('pass')} /></label>
+      <label class="lbl">Confirme a nova senha<input class="in" type="password" autocomplete="new-password" value=${s.pass2} onInput=${set('pass2')} onKeyDown=${enter(onEnter)} /></label>
+      <p class="muted" style="font-size:12px">Mínimo de 8 caracteres, com letras e números.</p>`;
+
+    if (s.screen === 'loading') return html`<main style="min-height:100vh;display:flex;align-items:center;justify-content:center"><span class="serif" style="font-size:36px">Optimus</span></main>`;
+    if (s.screen === 'studio') return html`<${StudioApp} key=${s.acct.id} initial=${s.data} version=${s.version} studioName=${s.acct.studio_name} email=${s.userEmail} onLogout=${() => this.logout()} onRefresh=${() => this.route()} />`;
+    if (s.screen === 'admin') return html`<${AdminPanel} onLogout=${() => this.logout()} />`;
+
+    if (s.screen === 'login') return this.card('Área restrita', 'Optimus', 'Entre com seu e-mail e senha.', html`
+      <label class="lbl">E-mail<input class="in" type="email" autocomplete="username" value=${s.email} onInput=${set('email')} /></label>
+      <label class="lbl">Senha<input class="in" type="password" autocomplete="current-password" value=${s.pass} onInput=${set('pass')} onKeyDown=${enter(() => this.login())} /></label>
+      <button type="button" class="btn" disabled=${s.busy} onClick=${() => this.login()}>${s.busy ? 'Entrando…' : 'Entrar'}</button>
+      ${link('Esqueci minha senha', () => this.setState({ screen: 'forgot', err: '', info: '' }))}`);
+
+    if (s.screen === 'forgot') return this.card('Recuperar acesso', 'Esqueci a senha', 'Enviaremos um link para o seu e-mail para criar uma nova senha.', html`
+      <label class="lbl">E-mail<input class="in" type="email" autocomplete="username" value=${s.email} onInput=${set('email')} onKeyDown=${enter(() => this.forgot())} /></label>
+      <button type="button" class="btn" disabled=${s.busy} onClick=${() => this.forgot()}>${s.busy ? 'Enviando…' : 'Enviar link'}</button>
+      ${link('Voltar para o login', () => this.setState({ screen: 'login', err: '', info: '' }))}`);
+
+    if (s.screen === 'recovery') return this.card('Recuperar acesso', 'Nova senha', 'Crie uma nova senha para sua conta.', html`
+      ${pwFields(() => this.newPassword(true))}
+      <button type="button" class="btn" disabled=${s.busy} onClick=${() => this.newPassword(true)}>${s.busy ? 'Salvando…' : 'Salvar nova senha'}</button>`);
+
+    if (s.screen === 'change') return this.card('Primeiro acesso', s.acct.studio_name || 'Optimus', 'Bem-vinda! Crie sua senha pessoal para continuar. A senha provisória deixa de valer.', html`
+      ${pwFields(() => this.newPassword(false))}
+      <button type="button" class="btn" disabled=${s.busy} onClick=${() => this.newPassword(false)}>${s.busy ? 'Salvando…' : 'Criar senha e entrar'}</button>
+      ${link('Sair', () => this.logout())}`);
+
+    if (s.screen === 'blocked') return this.card('Acesso suspenso', s.acct.studio_name || 'Optimus',
+      s.acct.status === 'bloqueado' ? 'Seu acesso está bloqueado no momento.' : 'Sua assinatura venceu em ' + fmtBR(s.acct.paid_until) + '.', html`
+      <p style="font-size:15px;line-height:1.6;text-align:center">Seus dados estão guardados com segurança. Fale com o suporte do Optimus para renovar e liberar o acesso.</p>
+      <button type="button" class="btn btn-line" onClick=${() => this.route()}>Já renovei, verificar de novo</button>
+      ${link('Sair', () => this.logout())}`);
+
+    if (s.screen === 'noaccount') return this.card('Acesso', 'Optimus', 'Este login não tem um studio vinculado. Fale com o suporte do Optimus.', html`
+      ${link('Sair', () => this.logout())}`);
+
+    if (s.screen === 'setup') return this.card('Configuração inicial', 'Administrador', 'Crie a conta do administrador do Optimus. Ela gerencia os acessos dos studios. Esta tela só aparece uma vez.', html`
+      <label class="lbl">E-mail do administrador<input class="in" type="email" autocomplete="username" value=${s.email} onInput=${set('email')} /></label>
+      ${pwFields(() => this.setup())}
+      <button type="button" class="btn" disabled=${s.busy} onClick=${() => this.setup()}>${s.busy ? 'Criando…' : 'Criar administrador'}</button>`);
+    return null;
+  }
+}
+
+render(html`<${Root} />`, document.getElementById('app'));
