@@ -6,8 +6,9 @@ Sistema minimalista para studio de estética: login, cadastro de clientes com an
 Publicado no GitHub Pages: https://guireserve.github.io/optimus-estetica/ — também funciona no Vercel (headers extras em `vercel.json`). No primeiro acesso, crie seu usuário e senha.
 
 ## Contas e acesso (Supabase)
-- **Painel do administrador**: cria o acesso de cada studio (nome, responsável, e-mail, WhatsApp, plano, mensalidade, vencimento), gera senha provisória, renova (+1 mês), bloqueia/libera e gera nova senha. Não existe exclusão: contas são só bloqueadas.
-- **Login dos studios**: e-mail e senha; troca obrigatória da senha provisória no primeiro acesso; "Esqueci minha senha" com link por e-mail.
+- **Painel do administrador**: cria o acesso de cada cliente (nome do negócio, responsável, usuário, e-mail de contato opcional, WhatsApp, plano, mensalidade, vencimento), gera senha provisória, renova (+1 mês), bloqueia/libera e gera nova senha. Não existe exclusão: contas são só bloqueadas.
+- **Login dos clientes**: usuário e senha criados pelo administrador; troca obrigatória da senha provisória no primeiro acesso. Esqueceu a senha? O administrador gera uma nova no painel.
+- **Atalho na tela inicial**: ícone com a logo (iPhone, Android e computador) via `manifest.webmanifest` e `icons/`.
 - **Vencimento**: quando a data "pago até" passa, o studio perde o acesso automaticamente até ser renovado. Os dados ficam guardados.
 - **Dados na nuvem**: cada studio só lê e grava os próprios dados (Row Level Security). O administrador não vê os dados dos studios.
 - **Histórico**: cada salvamento guarda a versão anterior em `studio_data_history` (cópia de segurança).

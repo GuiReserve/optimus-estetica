@@ -993,13 +993,18 @@ const sb = window.supabase.createClient(SB_URL, SB_KEY, { auth: { persistSession
 const pwOk = (p) => p.length >= 8 && /[A-Za-z]/.test(p) && /[0-9]/.test(p);
 const PW_RULE = 'A senha precisa ter pelo menos 8 caracteres, com letras e números.';
 const emailOk = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+const USER_DOMAIN = 'optimus.invalid';
+const userOk = (u) => /^[a-z0-9][a-z0-9._-]{2,29}$/.test(u);
+const normUser = (u) => u.trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, '.');
+// Clientes entram com usuário; o administrador também pode entrar com o e-mail dele.
+const loginId = (u) => { const v = u.trim().toLowerCase(); return v.includes('@') ? v : normUser(v) + '@' + USER_DOMAIN; };
 const fmtBR = (iso) => { if (!iso) return '—'; const p = iso.split('-'); return p[2] + '/' + p[1] + '/' + p[0]; };
 const todayISO = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
 const addMonth = (iso) => { const p = iso.split('-').map(Number); const d = new Date(p[0], p[1], p[2]); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
 const moneyBR = (v) => (Number(v) || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 const authErr = (e) => {
   const m = (e && e.message) || '';
-  if (/invalid login|invalid credentials/i.test(m)) return 'E-mail ou senha incorretos.';
+  if (/invalid login|invalid credentials/i.test(m)) return 'Usuário ou senha incorretos.';
   if (/rate limit|too many/i.test(m)) return 'Muitas tentativas. Aguarde alguns minutos e tente novamente.';
   if (/same.*password|different from the old/i.test(m)) return 'A nova senha precisa ser diferente da atual.';
   if (/weak|pwned|leaked/i.test(m)) return 'Essa senha é fraca ou já vazou em outros sites. Escolha outra.';
@@ -1134,7 +1139,7 @@ class StudioApp extends Component {
 }
 
 /* ================= Painel do administrador ================= */
-const emptyAdminForm = () => ({ id: '', studio_name: '', owner_name: '', email: '', phone: '', plan: 'Mensal', monthly_fee: '', paid_until: addMonth(todayISO()), notes: '' });
+const emptyAdminForm = () => ({ id: '', username: '', origUsername: '', studio_name: '', owner_name: '', email: '', phone: '', plan: 'Mensal', monthly_fee: '', paid_until: addMonth(todayISO()), notes: '' });
 
 class AdminPanel extends PreactComponent {
   constructor(props) {
@@ -1149,11 +1154,18 @@ class AdminPanel extends PreactComponent {
   set(k) { return (e) => { const v = e.target.value; this.setState((st) => ({ form: Object.assign({}, st.form, { [k]: v }) })); }; }
   async submit() {
     const f = this.state.form;
-    if (!f.studio_name.trim()) return this.setState({ err: 'Informe o nome do studio.' });
-    if (!f.id && !emailOk(f.email.trim())) return this.setState({ err: 'Informe um e-mail válido.' });
+    const username = normUser(f.username);
+    if (!f.studio_name.trim()) return this.setState({ err: 'Informe o nome do negócio.' });
+    if (!userOk(username)) return this.setState({ err: 'Usuário inválido: use de 3 a 30 letras minúsculas, números, ponto, hífen ou _ (sem espaços e sem acentos).' });
+    if (f.email.trim() && !emailOk(f.email.trim())) return this.setState({ err: 'E-mail de contato inválido.' });
     this.setState({ busy: true, err: '' });
     if (f.id) {
+      if (username !== f.origUsername) {
+        const r = await sb.functions.invoke('admin-users', { body: { action: 'set_username', account_id: f.id, username } });
+        if (r.error) return this.setState({ busy: false, err: await fnError(r.error) });
+      }
       const { error } = await sb.from('accounts').update({
+        email: f.email.trim().toLowerCase() || null,
         studio_name: f.studio_name.trim(), owner_name: f.owner_name.trim() || null, phone: f.phone.trim() || null,
         plan: f.plan.trim() || 'Mensal', monthly_fee: Number(f.monthly_fee) || 0, paid_until: f.paid_until || null,
         notes: f.notes.trim() || null, updated_at: new Date().toISOString()
@@ -1161,10 +1173,10 @@ class AdminPanel extends PreactComponent {
       this.setState({ busy: false, err: error ? 'Não foi possível salvar.' : '', form: error ? f : emptyAdminForm() });
       return this.load();
     }
-    const { data, error } = await sb.functions.invoke('admin-users', { body: Object.assign({ action: 'create' }, f, { monthly_fee: Number(f.monthly_fee) || 0 }) });
+    const { data, error } = await sb.functions.invoke('admin-users', { body: Object.assign({ action: 'create' }, f, { username, monthly_fee: Number(f.monthly_fee) || 0 }) });
     if (error) return this.setState({ busy: false, err: await fnError(error) });
     this.setState({ busy: false, form: emptyAdminForm(), copied: false,
-      cred: { studio: data.account.studio_name, owner: data.account.owner_name, phone: data.account.phone, email: data.account.email, pass: data.temp_password, isNew: true } });
+      cred: { studio: data.account.studio_name, owner: data.account.owner_name, phone: data.account.phone, user: data.account.username, pass: data.temp_password, isNew: true } });
     this.load();
   }
   async patch(id, values) {
@@ -1177,12 +1189,12 @@ class AdminPanel extends PreactComponent {
     this.setState({ busy: true, err: '', confirm: '' });
     const { data, error } = await sb.functions.invoke('admin-users', { body: { action: 'reset', account_id: a.id } });
     if (error) return this.setState({ busy: false, err: await fnError(error) });
-    this.setState({ busy: false, copied: false, cred: { studio: a.studio_name, owner: a.owner_name, phone: a.phone, email: data.email, pass: data.temp_password, isNew: false } });
+    this.setState({ busy: false, copied: false, cred: { studio: a.studio_name, owner: a.owner_name, phone: a.phone, user: data.username || a.username, pass: data.temp_password, isNew: false } });
     this.load();
   }
   credText(c) {
     return 'Olá' + (c.owner ? ', ' + c.owner.split(' ')[0] : '') + '! ' + (c.isNew ? 'Seu acesso ao Optimus está pronto.' : 'Geramos uma nova senha para seu acesso ao Optimus.') +
-      '\n\nSite: ' + SITE_URL + '\nE-mail: ' + c.email + '\nSenha provisória: ' + c.pass + '\n\nNo primeiro acesso você vai criar sua própria senha.';
+      '\n\nSite: ' + SITE_URL + '\nUsuário: ' + c.user + '\nSenha provisória: ' + c.pass + '\n\nNo primeiro acesso você vai criar sua própria senha.';
   }
   render() {
     const s = this.state, f = s.form, today = todayISO();
@@ -1196,7 +1208,7 @@ class AdminPanel extends PreactComponent {
         statusCls: a.status === 'bloqueado' ? 'chip chip-done' : expired ? 'chip chip-wait' : soon ? 'chip chip-wait' : 'chip chip-ok' });
     });
     const q = s.q.trim().toLowerCase();
-    const shown = rows.filter((a) => (!q || (a.studio_name + ' ' + (a.owner_name || '') + ' ' + a.email).toLowerCase().includes(q)) &&
+    const shown = rows.filter((a) => (!q || (a.studio_name + ' ' + (a.owner_name || '') + ' ' + (a.username || '') + ' ' + (a.email || '')).toLowerCase().includes(q)) &&
       (s.filter === 'todos' || (s.filter === 'ativos' && a.active) || (s.filter === 'vencidos' && a.expired && a.status === 'ativo') || (s.filter === 'bloqueados' && a.status === 'bloqueado')));
     const activeRows = rows.filter((a) => a.active);
     const stat = (k, n, d) => html`<div class="card" style="padding:20px"><span class="kicker">${k}</span><div class="serif" style="font-size:36px">${n}</div><span class="muted" style="font-size:13px">${d}</span></div>`;
@@ -1233,9 +1245,11 @@ class AdminPanel extends PreactComponent {
         <div style=${ROW2}>
           <section class="card" style=${FORMCARD}>
             <div><span class="kicker">${f.id ? 'Editar' : 'Novo cliente'}</span><h2 class="serif" style="font-size:30px">${f.id ? 'Editar acesso' : 'Criar acesso'}</h2></div>
-            <label class="lbl">Nome do studio<input class="in" value=${f.studio_name} onInput=${this.set('studio_name')} placeholder="Ex.: Studio Bella" /></label>
-            <label class="lbl">Responsável<input class="in" value=${f.owner_name} onInput=${this.set('owner_name')} placeholder="Nome da dona do studio" /></label>
-            <label class="lbl">E-mail de acesso<input class="in" type="email" value=${f.email} onInput=${this.set('email')} disabled=${!!f.id} placeholder="cliente@email.com" /></label>
+            <label class="lbl">Nome do negócio<input class="in" value=${f.studio_name} onInput=${this.set('studio_name')} placeholder="Ex.: Studio Bella" /></label>
+            <label class="lbl">Responsável<input class="in" value=${f.owner_name} onInput=${this.set('owner_name')} placeholder="Nome do responsável" /></label>
+            <label class="lbl">Usuário de acesso<input class="in" value=${f.username} onInput=${this.set('username')} autocapitalize="none" autocomplete="off" spellcheck="false" placeholder="Ex.: studiobella" /></label>
+            <p class="muted" style="font-size:12px;margin-top:-8px">Letras minúsculas, números, ponto, hífen ou _. Sem espaços e sem acentos.</p>
+            <label class="lbl">E-mail de contato (opcional)<input class="in" type="email" value=${f.email} onInput=${this.set('email')} placeholder="cliente@email.com" /></label>
             <label class="lbl">WhatsApp<input class="in" type="tel" value=${f.phone} onInput=${this.set('phone')} placeholder="(11) 98888-7777" /></label>
             <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px">
               <label class="lbl">Plano<input class="in" value=${f.plan} onInput=${this.set('plan')} placeholder="Mensal" /></label>
@@ -1265,7 +1279,7 @@ class AdminPanel extends PreactComponent {
                 <span class="av" aria-hidden="true">${(a.studio_name || '?').slice(0, 2)}</span>
                 <div style="flex:1 1 220px;min-width:0;display:flex;flex-direction:column;gap:2px">
                   <span style="font-size:16px;font-weight:500">${a.studio_name}</span>
-                  <span class="muted" style="font-size:13px;word-break:break-all">${a.owner_name ? a.owner_name + ' · ' : ''}${a.email}</span>
+                  <span class="muted" style="font-size:13px;word-break:break-all">${a.username ? 'Usuário: ' + a.username : 'Sem usuário: clique em editar para definir'}${a.owner_name ? ' · ' + a.owner_name : ''}</span>
                   <span class="muted" style="font-size:13px">${a.plan} · ${moneyBR(a.monthly_fee)} · pago até ${fmtBR(a.paid_until)}</span>
                 </div>
                 <span class=${a.statusCls}>${a.statusLabel}</span>
@@ -1279,7 +1293,7 @@ class AdminPanel extends PreactComponent {
                       <button type="button" class="btn btn-soft btn-sm" onClick=${() => this.patch(a.id, { status: 'ativo', paid_until: addMonth(a.paid_until && a.paid_until > today ? a.paid_until : today) })}>Renovar +1 mês</button>
                       <button type="button" class="btn btn-line btn-sm" onClick=${() => this.setState({ confirm: a.id })}>${a.status === 'bloqueado' ? 'Liberar' : 'Bloquear'}</button>
                       <button type="button" class="btn btn-line btn-sm" disabled=${s.busy} onClick=${() => this.reset(a)}>Nova senha</button>
-                      <button type="button" class="btn btn-line btn-sm btn-icon" aria-label="Editar acesso" onClick=${() => this.setState({ err: '', form: { id: a.id, studio_name: a.studio_name || '', owner_name: a.owner_name || '', email: a.email, phone: a.phone || '', plan: a.plan || 'Mensal', monthly_fee: String(a.monthly_fee ?? ''), paid_until: a.paid_until || '', notes: a.notes || '' } })}>${IconEdit}</button>
+                      <button type="button" class="btn btn-line btn-sm btn-icon" aria-label="Editar acesso" onClick=${() => this.setState({ err: '', form: { id: a.id, username: a.username || '', origUsername: a.username || '', studio_name: a.studio_name || '', owner_name: a.owner_name || '', email: a.email || '', phone: a.phone || '', plan: a.plan || 'Mensal', monthly_fee: String(a.monthly_fee ?? ''), paid_until: a.paid_until || '', notes: a.notes || '' } })}>${IconEdit}</button>
                     </div>`}
               </div>`)}
           </section>
@@ -1319,10 +1333,10 @@ class Root extends PreactComponent {
     this.setState({ screen: 'studio', acct, data: (sd && sd.data) || {}, version: (sd && sd.version) || 0, busy: false, userEmail: session.user.email });
   }
   async login() {
-    const email = this.state.email.trim().toLowerCase();
-    if (!emailOk(email) || !this.state.pass) return this.setState({ err: 'Informe seu e-mail e sua senha.' });
+    const user = this.state.email.trim();
+    if (!user || !this.state.pass) return this.setState({ err: 'Informe seu usuário e sua senha.' });
     this.setState({ busy: true, err: '', info: '' });
-    const { error } = await sb.auth.signInWithPassword({ email, password: this.state.pass });
+    const { error } = await sb.auth.signInWithPassword({ email: loginId(user), password: this.state.pass });
     if (error) return this.setState({ busy: false, err: authErr(error) });
     this.setState({ pass: '' });
     this.route();
@@ -1391,22 +1405,21 @@ class Root extends PreactComponent {
     if (s.screen === 'studio') return html`<${StudioApp} key=${s.acct.id} initial=${s.data} version=${s.version} studioName=${s.acct.studio_name} email=${s.userEmail} onLogout=${() => this.logout()} onRefresh=${() => this.route()} />`;
     if (s.screen === 'admin') return html`<${AdminPanel} onLogout=${() => this.logout()} />`;
 
-    if (s.screen === 'login') return this.card('Área restrita', 'Optimus', 'Entre com seu e-mail e senha.', html`
-      <label class="lbl">E-mail<input class="in" type="email" autocomplete="username" value=${s.email} onInput=${set('email')} /></label>
+    if (s.screen === 'login') return this.card('Área restrita', 'Optimus', 'Entre com seu usuário e senha.', html`
+      <label class="lbl">Usuário<input class="in" autocomplete="username" autocapitalize="none" spellcheck="false" value=${s.email} onInput=${set('email')} /></label>
       <label class="lbl">Senha<input class="in" type="password" autocomplete="current-password" value=${s.pass} onInput=${set('pass')} onKeyDown=${enter(() => this.login())} /></label>
       <button type="button" class="btn" disabled=${s.busy} onClick=${() => this.login()}>${s.busy ? 'Entrando…' : 'Entrar'}</button>
       ${link('Esqueci minha senha', () => this.setState({ screen: 'forgot', err: '', info: '' }))}`);
 
-    if (s.screen === 'forgot') return this.card('Recuperar acesso', 'Esqueci a senha', 'Enviaremos um link para o seu e-mail para criar uma nova senha.', html`
-      <label class="lbl">E-mail<input class="in" type="email" autocomplete="username" value=${s.email} onInput=${set('email')} onKeyDown=${enter(() => this.forgot())} /></label>
-      <button type="button" class="btn" disabled=${s.busy} onClick=${() => this.forgot()}>${s.busy ? 'Enviando…' : 'Enviar link'}</button>
+    if (s.screen === 'forgot') return this.card('Recuperar acesso', 'Esqueci a senha', '', html`
+      <p style="font-size:15px;line-height:1.6;text-align:center">Fale com o suporte do Optimus. Vamos gerar uma nova senha provisória para o seu usuário, e no próximo acesso você cria a sua.</p>
       ${link('Voltar para o login', () => this.setState({ screen: 'login', err: '', info: '' }))}`);
 
     if (s.screen === 'recovery') return this.card('Recuperar acesso', 'Nova senha', 'Crie uma nova senha para sua conta.', html`
       ${pwFields(() => this.newPassword(true))}
       <button type="button" class="btn" disabled=${s.busy} onClick=${() => this.newPassword(true)}>${s.busy ? 'Salvando…' : 'Salvar nova senha'}</button>`);
 
-    if (s.screen === 'change') return this.card('Primeiro acesso', s.acct.studio_name || 'Optimus', 'Bem-vinda! Crie sua senha pessoal para continuar. A senha provisória deixa de valer.', html`
+    if (s.screen === 'change') return this.card('Primeiro acesso', s.acct.studio_name || 'Optimus', 'Boas-vindas! Crie sua senha pessoal para continuar. A senha provisória deixa de valer.', html`
       ${pwFields(() => this.newPassword(false))}
       <button type="button" class="btn" disabled=${s.busy} onClick=${() => this.newPassword(false)}>${s.busy ? 'Salvando…' : 'Criar senha e entrar'}</button>
       ${link('Sair', () => this.logout())}`);

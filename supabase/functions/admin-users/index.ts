@@ -1,7 +1,8 @@
 // Optimus — gestão de acessos (somente administradores).
 // Ações: bootstrap (cria o primeiro admin, só funciona enquanto não existe nenhum),
 //        create (cria o acesso de um studio com senha provisória),
-//        reset (gera nova senha provisória para um studio).
+//        reset (gera nova senha provisória para um studio),
+//        set_username (troca o nome de usuário de login de uma conta).
 // Não existe ação de exclusão: contas são apenas bloqueadas.
 import { createClient } from "npm:@supabase/supabase-js@2";
 
@@ -29,6 +30,10 @@ function tempPassword(): string {
 
 const str = (v: unknown, max: number) => (typeof v === "string" ? v.trim().slice(0, max) : "");
 const emailOk = (e: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+// Login por usuário: o Supabase Auth exige e-mail, então cada usuário vira um endereço interno que nunca recebe mensagens.
+const USER_DOMAIN = "optimus.invalid";
+const userOk = (u: string) => /^[a-z0-9][a-z0-9._-]{2,29}$/.test(u);
+const loginEmail = (u: string) => `${u}@${USER_DOMAIN}`;
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -65,20 +70,24 @@ Deno.serve(async (req) => {
   if (!isAdm) return json({ error: "Acesso restrito ao administrador" }, 403);
 
   if (action === "create") {
+    const username = str(body.username, 30).toLowerCase();
     const email = str(body.email, 254).toLowerCase();
     const studio_name = str(body.studio_name, 120);
-    if (!studio_name) return json({ error: "Informe o nome do studio" }, 400);
-    if (!emailOk(email)) return json({ error: "E-mail inválido" }, 400);
+    if (!studio_name) return json({ error: "Informe o nome do negócio" }, 400);
+    if (!userOk(username)) return json({ error: "Usuário inválido: use de 3 a 30 letras minúsculas, números, ponto, hífen ou _ (sem espaços e sem acentos)" }, 400);
+    if (email && !emailOk(email)) return json({ error: "E-mail de contato inválido" }, 400);
+    const { data: taken } = await admin.from("accounts").select("id").eq("username", username).maybeSingle();
+    if (taken) return json({ error: "Este usuário já existe. Escolha outro." }, 400);
     const fee = Number(body.monthly_fee);
     const paid_until = typeof body.paid_until === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.paid_until) ? body.paid_until : null;
     const password = tempPassword();
-    const { data, error } = await admin.auth.admin.createUser({ email, password, email_confirm: true });
+    const { data, error } = await admin.auth.admin.createUser({ email: loginEmail(username), password, email_confirm: true, user_metadata: { username } });
     if (error || !data.user) {
-      const msg = /already|registered|exists/i.test(error?.message ?? "") ? "Já existe um acesso com este e-mail" : "Não foi possível criar o acesso";
+      const msg = /already|registered|exists/i.test(error?.message ?? "") ? "Este usuário já existe. Escolha outro." : "Não foi possível criar o acesso: " + (error?.message ?? "");
       return json({ error: msg }, 400);
     }
     const { data: acc, error: e2 } = await admin.from("accounts").insert({
-      user_id: data.user.id, email, studio_name,
+      user_id: data.user.id, username, email: email || null, studio_name,
       owner_name: str(body.owner_name, 120) || null,
       phone: str(body.phone, 30) || null,
       plan: str(body.plan, 60) || "Mensal",
@@ -93,13 +102,28 @@ Deno.serve(async (req) => {
 
   if (action === "reset") {
     const id = str(body.account_id, 64);
-    const { data: acc } = await admin.from("accounts").select("id, user_id, email").eq("id", id).maybeSingle();
+    const { data: acc } = await admin.from("accounts").select("id, user_id, email, username").eq("id", id).maybeSingle();
     if (!acc || !acc.user_id) return json({ error: "Conta não encontrada" }, 404);
     const password = tempPassword();
     const { error } = await admin.auth.admin.updateUserById(acc.user_id, { password });
     if (error) return json({ error: "Não foi possível gerar nova senha" }, 500);
     await admin.from("accounts").update({ must_change_password: true, updated_at: new Date().toISOString() }).eq("id", acc.id);
-    return json({ ok: true, email: acc.email, temp_password: password });
+    return json({ ok: true, username: acc.username, email: acc.email, temp_password: password });
+  }
+
+  if (action === "set_username") {
+    const id = str(body.account_id, 64);
+    const username = str(body.username, 30).toLowerCase();
+    if (!userOk(username)) return json({ error: "Usuário inválido: use de 3 a 30 letras minúsculas, números, ponto, hífen ou _ (sem espaços e sem acentos)" }, 400);
+    const { data: acc } = await admin.from("accounts").select("id, user_id, username").eq("id", id).maybeSingle();
+    if (!acc || !acc.user_id) return json({ error: "Conta não encontrada" }, 404);
+    if (acc.username === username) return json({ ok: true, username });
+    const { data: taken } = await admin.from("accounts").select("id").eq("username", username).maybeSingle();
+    if (taken) return json({ error: "Este usuário já existe. Escolha outro." }, 400);
+    const { error } = await admin.auth.admin.updateUserById(acc.user_id, { email: loginEmail(username), email_confirm: true, user_metadata: { username } });
+    if (error) return json({ error: "Não foi possível alterar o usuário: " + error.message }, 400);
+    await admin.from("accounts").update({ username, updated_at: new Date().toISOString() }).eq("id", acc.id);
+    return json({ ok: true, username });
   }
 
   return json({ error: "Ação desconhecida" }, 400);
