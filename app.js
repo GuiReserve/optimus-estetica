@@ -16,7 +16,7 @@ class Component extends DCLogic {
       clients: saved.clients || [],
       services: saved.services || [],
       appts: saved.appts || [],
-      expenses: saved.expenses || [], ef: { id: '', name: '', amount: '', day: '' }, efErr: '', finPeriod: 'mes',
+      expenses: saved.expenses || [], quick: saved.quick || this._defaultQuick(), qf: { id: '', title: '', text: '' }, qfErr: '', quickTo: {}, ef: { id: '', name: '', amount: '', day: '' }, efErr: '', finPeriod: 'mes',
       tpl: Object.assign({}, this._defaultTpl(), saved.tpl || {}),
       cf: this._emptyCF(), sf: this._emptySF(), af: this._emptyAF(),
       search: '', agFilter: 'abertos', notifOpen: true, confirmDel: '',
@@ -28,7 +28,7 @@ class Component extends DCLogic {
     var s = this.state;
     try {
       window.localStorage.setItem('studio-estetica-v1', JSON.stringify({
-        auth: s.auth, studio: s.studio, clients: s.clients, services: s.services, appts: s.appts, tpl: s.tpl, expenses: s.expenses
+        auth: s.auth, studio: s.studio, clients: s.clients, services: s.services, appts: s.appts, tpl: s.tpl, expenses: s.expenses, quick: s.quick
       }));
     } catch (e) {}
   }
@@ -38,8 +38,25 @@ class Component extends DCLogic {
     return {
       bday: 'Olá, {nome}! Hoje o dia é todo seu. A equipe do {studio} deseja um feliz aniversário, com muita saúde, leveza e autocuidado. Preparamos um mimo especial para você neste mês: venha nos visitar!',
       confirm: 'Olá, {nome}! Tudo bem? Passando para confirmar seu horário no {studio}: {servico} na {dia}, {data}, às {hora}. Valor: {valor}. Podemos confirmar? Qualquer imprevisto, é só nos avisar.',
-      follow: 'Olá, {nome}! Como você está se sentindo após o {servico}? Estamos acompanhando seu cuidado de perto. Qualquer dúvida ou sensação diferente, fale com a gente. Obrigada pela confiança no {studio}!'
+      follow: 'Olá, {nome}! Como você está se sentindo após o seu atendimento de {servico}? Estamos acompanhando seu cuidado de perto. Qualquer dúvida ou sensação diferente, fale com a gente. Obrigada pela confiança no {studio}!'
     };
+  }
+  _defaultQuick() {
+    return [
+      { id: 'q-retorno', title: 'Lembrete de retorno', text: 'Olá, {nome}! Já faz um tempinho desde o seu último cuidado no {studio}. Que tal agendar seu retorno? Temos horários disponíveis esta semana.' },
+      { id: 'q-obrigada', title: 'Agradecimento', text: 'Olá, {nome}! Obrigada pela visita ao {studio}. Foi um prazer cuidar de você. Esperamos você em breve!' }
+    ];
+  }
+  saveQuick() {
+    var s = this.state, f = s.qf;
+    if (!f.title.trim()) return this.setState({ qfErr: 'Dê um título para a mensagem.' });
+    if (!f.text.trim()) return this.setState({ qfErr: 'Escreva o texto da mensagem.' });
+    var data = { title: f.title.trim(), text: f.text.trim() };
+    var list = s.quick || [];
+    var quick = f.id
+      ? list.map(function (x) { return x.id === f.id ? Object.assign({}, x, data) : x; })
+      : list.concat([Object.assign({ id: this._uid() }, data)]);
+    this.setState({ quick: quick, qf: { id: '', title: '', text: '' }, qfErr: '' });
   }
   _emptyCF() { return { id: '', name: '', phone: '', birth: '', notes: '' }; }
   _emptySF() { return { id: '', name: '', price: '', duration: '' }; }
@@ -249,6 +266,7 @@ class Component extends DCLogic {
       { id: 'agenda', label: 'Agenda', badge: agBadge },
       { id: 'servicos', label: 'Serviços', badge: 0 },
       { id: 'aniversarios', label: 'Aniversários', badge: bdayBadge },
+      { id: 'mensagens', label: 'Mensagens', badge: 0 },
       { id: 'financas', label: 'Finanças', badge: 0 }
     ];
     var tabs = tabDefs.map(function (t) {
@@ -426,6 +444,31 @@ class Component extends DCLogic {
     on.efName = this._bind('ef', 'name'); on.efAmount = this._bind('ef', 'amount'); on.efDay = this._bind('ef', 'day');
 
     var firstClient = s.clients[0];
+
+    /* messages */
+    var firstSvc = s.services[0];
+    var sample = { nome: firstClient ? this._first(firstClient.name) : 'Mariana', studio: studio,
+      servico: firstSvc ? firstSvc.name : 'Limpeza de pele', data: this._fmt(tomorrow), dia: this._wd(tomorrow, true),
+      hora: '14:00', valor: this._money(firstSvc ? firstSvc.price : 150) };
+    var autoMsgs = [
+      { key: 'bday', title: 'Aniversário', when: 'Enviada no dia do aniversário da cliente, pelos avisos e pela aba Aniversários.' },
+      { key: 'confirm', title: 'Confirmação de agendamento', when: 'Enviada no botão Confirmar da Agenda e nos avisos de hoje e amanhã.' },
+      { key: 'follow', title: 'Acompanhamento', when: 'Enviada depois que o serviço é marcado como feito.' }
+    ].map(function (m) {
+      return { title: m.title, when: m.when, text: s.tpl[m.key], preview: self._fill(s.tpl[m.key], sample), onText: self._bind('tpl', m.key) };
+    });
+    var quickView = (s.quick || []).map(function (q) {
+      var to = (s.quickTo || {})[q.id] || '';
+      var c = to ? cById[to] : null;
+      var href = c ? self._wa(c.phone, self._fill(q.text, { nome: self._first(c.name), studio: studio })) : '';
+      return { title: q.title, text: q.text, to: to, href: href, hasHref: !!href, noPhone: !!c && !href,
+        onTo: function (e) { var v = e.target.value; self.setState(function (st) { var m = Object.assign({}, st.quickTo); m[q.id] = v; return { quickTo: m }; }); },
+        edit: function () { self.setState({ qf: { id: q.id, title: q.title, text: q.text }, qfErr: '' }); },
+        askDel: function () { self.setState({ confirmDel: q.id }); },
+        del: function () { self.setState(function (st) { return { quick: (st.quick || []).filter(function (x) { return x.id !== q.id; }), confirmDel: '' }; }); },
+        confirming: s.confirmDel === q.id, notConfirming: s.confirmDel !== q.id };
+    });
+    on.qfTitle = this._bind('qf', 'title'); on.qfText = this._bind('qf', 'text');
     var isSetup = !s.auth;
 
     return {
@@ -441,7 +484,12 @@ class Component extends DCLogic {
       notifOpen: s.notifOpen, toggleNotif: function () { self.setState({ notifOpen: !self.state.notifOpen }); },
       cancelDel: function () { self.setState({ confirmDel: '' }); },
 
-      tabClientes: s.tab === 'clientes', tabAgenda: s.tab === 'agenda', tabServicos: s.tab === 'servicos', tabAniversarios: s.tab === 'aniversarios', tabFinancas: s.tab === 'financas',
+      tabClientes: s.tab === 'clientes', tabAgenda: s.tab === 'agenda', tabServicos: s.tab === 'servicos', tabAniversarios: s.tab === 'aniversarios', tabFinancas: s.tab === 'financas', tabMensagens: s.tab === 'mensagens',
+      autoMsgs: autoMsgs, quickView: quickView, noQuick: quickView.length === 0,
+      quickCountLabel: quickView.length === 1 ? '1 mensagem' : quickView.length + ' mensagens',
+      qf: s.qf, qfErr: s.qfErr, hasQfErr: !!s.qfErr, qfEditing: !!s.qf.id, qfTitle: s.qf.id ? 'Editar mensagem' : 'Nova mensagem rápida',
+      saveQuick: function () { self.saveQuick(); },
+      cancelQuick: function () { self.setState({ qf: { id: '', title: '', text: '' }, qfErr: '' }); },
       fin: fin, finFilters: finFilters, ef: s.ef, efErr: s.efErr, hasEfErr: !!s.efErr, efEditing: !!s.ef.id,
       efTitle: s.ef.id ? 'Editar gasto' : 'Novo gasto fixo',
       saveExpense: function () { self.saveExpense(); },
@@ -634,19 +682,6 @@ function viewAgenda(v) {
           ${v.hasAfErr && html`<p class="err" role="alert">${v.afErr}</p>`}
           <button type="button" class="btn" onClick=${v.saveAppt}>Agendar</button>
         </section>
-        <section class="card" style="display:flex;flex-direction:column;gap:16px">
-          <div>
-            <span class="kicker">WhatsApp</span>
-            <h2 class="serif" style="font-size:26px">Modelos de mensagem</h2>
-            <p class="muted" style="font-size:13px;padding-top:4px">Use {nome}, {servico}, {data}, {dia}, {hora}, {valor} e {studio}.</p>
-          </div>
-          <label class="lbl">Confirmação de agendamento
-            <textarea class="in" value=${v.tpl.confirm} onInput=${v.on.tplConfirm}></textarea>
-          </label>
-          <label class="lbl">Acompanhamento após o serviço
-            <textarea class="in" value=${v.tpl.follow} onInput=${v.on.tplFollow}></textarea>
-          </label>
-        </section>
       </div>
       <section class="card" style="flex:999 1 560px">
         <div style="display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:12px;padding-bottom:16px">
@@ -733,24 +768,8 @@ function viewServicos(v) {
 function viewAniversarios(v) {
   return html`
   <div style=${ROW2}>
-    <section class="card" style=${FORMCARD}>
-      <div>
-        <span class="kicker">Mensagem personalizada</span>
-        <h2 class="serif" style="font-size:30px">Parabéns</h2>
-        <p class="muted" style="font-size:13px;padding-top:4px">Use {nome} e {studio}. O texto abre pronto no WhatsApp da cliente.</p>
-      </div>
-      <label class="lbl">Nome do studio<input class="in" value=${v.studio} onInput=${v.on.studio} /></label>
-      <label class="lbl">Texto da mensagem
-        <textarea class="in" value=${v.tpl.bday} onInput=${v.on.tplBday} style="min-height:150px"></textarea>
-      </label>
-      <div style="background:#F6F2EE;border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:6px">
-        <span class="kicker">Prévia</span>
-        <p style="font-size:14px;line-height:1.55;white-space:pre-wrap">${v.bdayPreview}</p>
-      </div>
-      <button type="button" class="btn btn-line btn-sm" onClick=${v.resetTpl}>Restaurar textos padrão</button>
-    </section>
     <section class="card" style="flex:999 1 540px">
-      <div style="padding-bottom:16px"><span class="kicker">${v.bdayMonthLabel}</span><h2 class="serif" style="font-size:30px">Aniversários</h2></div>
+      <div style="padding-bottom:16px"><span class="kicker">${v.bdayMonthLabel}</span><h2 class="serif" style="font-size:30px">Aniversários</h2><p class="muted" style="font-size:13px;padding-top:4px">O texto de parabéns é editado na aba Mensagens.</p></div>
       ${v.noBdays && html`<p class="muted" style=${EMPTY}>Cadastre a data de aniversário das clientes na aba Clientes para receber os avisos aqui.</p>`}
       ${v.bdaysView.map((b) => html`
         <div class=${b.rowCls}>
@@ -858,6 +877,82 @@ function viewFinancas(v) {
   </div>`;
 }
 
+function viewMensagens(v) {
+  return html`
+  <div style="display:flex;flex-direction:column;gap:24px">
+    <div style="display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:16px">
+      <div style="max-width:640px">
+        <span class="kicker">WhatsApp</span>
+        <h2 class="serif" style="font-size:36px">Mensagens</h2>
+        <p class="muted" style="font-size:14px;padding-top:4px">Textos prontos que abrem no WhatsApp da cliente. Use {nome}, {studio} e, nas de agendamento, {servico}, {data}, {dia}, {hora} e {valor}.</p>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end">
+        <label class="lbl" style="width:240px">Nome do studio<input class="in" value=${v.studio} onInput=${v.on.studio} /></label>
+        <button type="button" class="btn btn-line" onClick=${v.resetTpl}>Restaurar textos padrão</button>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px">
+      ${v.autoMsgs.map((m) => html`
+        <section class="card" style="display:flex;flex-direction:column;gap:12px">
+          <div><span class="kicker">Automática</span><h3 class="serif" style="font-size:26px">${m.title}</h3><p class="muted" style="font-size:13px">${m.when}</p></div>
+          <label class="lbl">Texto<textarea class="in" value=${m.text} onInput=${m.onText} style="min-height:150px"></textarea></label>
+          <div style="background:#F6F2EE;border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:6px">
+            <span class="kicker">Prévia</span>
+            <p style="font-size:14px;line-height:1.55;white-space:pre-wrap">${m.preview}</p>
+          </div>
+        </section>`)}
+    </div>
+    <div style=${ROW2}>
+      <section class="card" style=${FORMCARD}>
+        <div><span class="kicker">Cadastro</span><h3 class="serif" style="font-size:28px">${v.qfTitle}</h3></div>
+        <label class="lbl">Título<input class="in" value=${v.qf.title} onInput=${v.on.qfTitle} placeholder="Ex.: Lembrete de retorno" /></label>
+        <label class="lbl">Mensagem<textarea class="in" value=${v.qf.text} onInput=${v.on.qfText} placeholder="Olá, {nome}! ..." style="min-height:140px"></textarea></label>
+        ${v.hasQfErr && html`<p class="err" role="alert">${v.qfErr}</p>`}
+        <div style="display:flex;flex-wrap:wrap;gap:8px">
+          <button type="button" class="btn" onClick=${v.saveQuick} style="flex:1 1 auto">Salvar mensagem</button>
+          ${v.qfEditing && html`<button type="button" class="btn btn-line" onClick=${v.cancelQuick}>Cancelar</button>`}
+        </div>
+      </section>
+      <section class="card" style="flex:999 1 540px">
+        <div style="padding-bottom:16px">
+          <span class="kicker">${v.quickCountLabel}</span>
+          <h3 class="serif" style="font-size:28px">Mensagens rápidas</h3>
+          <p class="muted" style="font-size:13px;padding-top:4px">Escolha a cliente e envie com um toque.</p>
+        </div>
+        ${v.noQuick && html`<p class="muted" style=${EMPTY}>Nenhuma mensagem rápida cadastrada.</p>`}
+        ${v.quickView.map((q) => html`
+          <div style="display:flex;flex-direction:column;gap:12px;padding:18px 0;border-top:1px solid #F0E9E4">
+            <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-start;gap:12px">
+              <div style="flex:1 1 260px;min-width:0;display:flex;flex-direction:column;gap:4px">
+                <span style="font-size:16px;font-weight:500">${q.title}</span>
+                <span class="muted" style="font-size:14px;line-height:1.5;white-space:pre-wrap">${q.text}</span>
+              </div>
+              ${q.notConfirming
+                ? html`<div style="display:flex;gap:6px">
+                    <button type="button" class="btn btn-line btn-sm btn-icon" onClick=${q.edit} aria-label="Editar mensagem">${IconEdit}</button>
+                    <button type="button" class="btn btn-line btn-sm btn-icon" onClick=${q.askDel} aria-label="Excluir mensagem">${IconTrash}</button>
+                  </div>`
+                : html`<div style="display:flex;gap:6px;align-items:center">
+                    <button type="button" class="btn btn-danger btn-sm" onClick=${q.del}>Excluir</button>
+                    <button type="button" class="btn btn-line btn-sm" onClick=${v.cancelDel}>Não</button>
+                  </div>`}
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end">
+              <label class="lbl" style="flex:1 1 220px">Enviar para
+                <select class="in" value=${q.to} onChange=${q.onTo}>
+                  <option value="">Selecione a cliente</option>
+                  ${v.clientOpts.map((o) => html`<option value=${o.id}>${o.name}</option>`)}
+                </select>
+              </label>
+              ${q.hasHref && html`<a class="btn btn-wa" href=${q.href} target="_blank" rel="noopener">${IconWa()} Enviar no WhatsApp</a>`}
+              ${q.noPhone && html`<span class="chip" style="margin-bottom:12px">Cliente sem WhatsApp</span>`}
+            </div>
+          </div>`)}
+      </section>
+    </div>
+  </div>`;
+}
+
 function view(v) {
   if (v.showAuth) return viewAuth(v);
   return html`
@@ -883,6 +978,7 @@ function view(v) {
       ${v.tabAgenda && viewAgenda(v)}
       ${v.tabServicos && viewServicos(v)}
       ${v.tabAniversarios && viewAniversarios(v)}
+      ${v.tabMensagens && viewMensagens(v)}
       ${v.tabFinancas && viewFinancas(v)}
     </main>
   </div>`;
@@ -950,7 +1046,7 @@ class App extends Component {
     ['pointerdown', 'keydown', 'scroll', 'touchstart'].forEach((ev) => window.removeEventListener(ev, this._touch));
   }
 
-  _pickData(s) { return { studio: s.studio, clients: s.clients, services: s.services, appts: s.appts, tpl: s.tpl, expenses: s.expenses }; }
+  _pickData(s) { return { studio: s.studio, clients: s.clients, services: s.services, appts: s.appts, tpl: s.tpl, expenses: s.expenses, quick: s.quick }; }
 
   componentDidUpdate() {
     if (!this.key || !this.state.logged) return;
@@ -1016,7 +1112,7 @@ class App extends Component {
         const src = this.legacy || {};
         const data = {
           studio: src.studio && src.studio !== 'Studio Estética' ? src.studio : 'Optimus',
-          clients: src.clients || [], services: src.services || [], appts: src.appts || [], expenses: src.expenses || [],
+          clients: src.clients || [], services: src.services || [], appts: src.appts || [], expenses: src.expenses || [], quick: src.quick || this._defaultQuick(),
           tpl: Object.assign({}, this._defaultTpl(), src.tpl || {})
         };
         const box = await seal(key, data);
@@ -1060,7 +1156,7 @@ class App extends Component {
     this.key = key;
     this.lastActive = Date.now();
     this.setState(Object.assign({ logged: true, busy: false, loginErr: '', lf: { user: '', pass: '', pass2: '' } }, {
-      studio: data.studio || 'Optimus', clients: data.clients || [], services: data.services || [], appts: data.appts || [], expenses: data.expenses || [],
+      studio: data.studio || 'Optimus', clients: data.clients || [], services: data.services || [], appts: data.appts || [], expenses: data.expenses || [], quick: data.quick || this._defaultQuick(),
       tpl: Object.assign({}, this._defaultTpl(), data.tpl || {})
     }));
   }
