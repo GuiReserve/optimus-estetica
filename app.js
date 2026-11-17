@@ -60,7 +60,7 @@ class Component extends DCLogic {
   }
   _emptyCF() { return { id: '', name: '', phone: '', birth: '', notes: '' }; }
   _emptySF() { return { id: '', name: '', price: '', duration: '' }; }
-  _emptyAF() { return { clientId: '', serviceId: '', date: this._iso(new Date()), time: '', price: '', notes: '' }; }
+  _emptyAF() { return { clientId: '', serviceIds: [], date: this._iso(new Date()), time: '', price: '', notes: '' }; }
   _pad(n) { return String(n).padStart(2, '0'); }
   _iso(d) { return d.getFullYear() + '-' + this._pad(d.getMonth() + 1) + '-' + this._pad(d.getDate()); }
   _parse(iso) { var p = String(iso).split('-').map(Number); return new Date(p[0], p[1] - 1, p[2]); }
@@ -158,15 +158,26 @@ class Component extends DCLogic {
       : s.services.concat([Object.assign({ id: this._uid() }, data)]);
     this.setState({ services: services, sf: this._emptySF(), sfErr: '' });
   }
+  _joinNames(list) {
+    if (list.length <= 1) return list[0] || '';
+    return list.slice(0, -1).join(', ') + ' e ' + list[list.length - 1];
+  }
+  _items(a, sById) {
+    var list = Array.isArray(a.items) && a.items.length ? a.items : [{ serviceId: a.serviceId, name: a.serviceName, price: Number(a.price) || 0 }];
+    return list.map(function (it) { var sv = sById[it.serviceId]; return { serviceId: it.serviceId, name: sv ? sv.name : (it.name || 'Serviço removido'), price: Number(it.price) || 0 }; });
+  }
   saveAppt() {
     var s = this.state, f = s.af;
+    var ids = (f.serviceIds || []).filter(function (id) { return s.services.some(function (x) { return x.id === id; }); });
     if (!f.clientId) return this.setState({ afErr: 'Selecione a cliente.' });
-    if (!f.serviceId) return this.setState({ afErr: 'Selecione o serviço.' });
+    if (!ids.length) return this.setState({ afErr: 'Selecione ao menos um serviço.' });
     if (!f.date || !f.time) return this.setState({ afErr: 'Informe a data e o horário.' });
     var c = s.clients.find(function (x) { return x.id === f.clientId; }) || {};
-    var sv = s.services.find(function (x) { return x.id === f.serviceId; }) || {};
-    var price = f.price === '' ? (sv.price || 0) : Number(f.price) || 0;
-    var a = { id: this._uid(), clientId: f.clientId, serviceId: f.serviceId, clientName: c.name, serviceName: sv.name,
+    var items = ids.map(function (id) { var sv = s.services.find(function (x) { return x.id === id; }); return { serviceId: id, name: sv.name, price: Number(sv.price) || 0 }; });
+    var sum = items.reduce(function (t, it) { return t + it.price; }, 0);
+    var price = f.price === '' ? sum : Number(f.price) || 0;
+    var a = { id: this._uid(), clientId: f.clientId, serviceId: ids[0], serviceIds: ids, items: items, clientName: c.name,
+      serviceName: items.map(function (it) { return it.name; }).join(' + '),
       date: f.date, time: f.time, price: price, notes: f.notes.trim(), confirmed: false, done: false, followed: false };
     var af = this._emptyAF(); af.date = f.date;
     this.setState({ appts: s.appts.concat([a]), af: af, afErr: '', agFilter: 'abertos' });
@@ -213,9 +224,13 @@ class Component extends DCLogic {
       sfName: this._bind('sf', 'name'), sfPrice: this._bind('sf', 'price'), sfDuration: this._bind('sf', 'duration'),
       afClient: this._bind('af', 'clientId'), afDate: this._bind('af', 'date'), afTime: this._bind('af', 'time'),
       afPrice: this._bind('af', 'price'), afNotes: this._bind('af', 'notes'),
-      afService: function (e) {
-        var v = e.target.value, sv = sById[v];
-        self.setState(function (st) { return { af: Object.assign({}, st.af, { serviceId: v, price: sv ? String(sv.price) : '' }) }; });
+      afToggleService: function (id) {
+        self.setState(function (st) {
+          var cur = st.af.serviceIds || [];
+          var ids = cur.indexOf(id) >= 0 ? cur.filter(function (x) { return x !== id; }) : cur.concat([id]);
+          var sum = ids.reduce(function (t, x) { return t + (sById[x] ? Number(sById[x].price) || 0 : 0); }, 0);
+          return { af: Object.assign({}, st.af, { serviceIds: ids, price: ids.length ? String(Math.round(sum * 100) / 100) : '' }) };
+        });
       },
       search: function (e) { self.setState({ search: e.target.value }); },
       studio: function (e) { self.setState({ studio: e.target.value }); },
@@ -223,8 +238,9 @@ class Component extends DCLogic {
     };
 
     var vars = function (a) {
-      var c = cById[a.clientId] || {}, sv = sById[a.serviceId] || {};
-      return { nome: self._first(c.name || a.clientName), servico: sv.name || a.serviceName || 'atendimento',
+      var c = cById[a.clientId] || {};
+      var names = self._items(a, sById).map(function (it) { return it.name; });
+      return { nome: self._first(c.name || a.clientName), servico: self._joinNames(names) || 'atendimento',
         data: self._fmt(a.date), dia: self._wd(a.date, true), hora: a.time, valor: self._money(a.price), studio: studio };
     };
     var bdayMsg = function (c) { return self._fill(s.tpl.bday, { nome: self._first(c.name), studio: studio }); };
@@ -298,7 +314,7 @@ class Component extends DCLogic {
 
     /* services */
     var svcCount = {};
-    s.appts.forEach(function (a) { svcCount[a.serviceId] = (svcCount[a.serviceId] || 0) + 1; });
+    s.appts.forEach(function (a) { self._items(a, sById).forEach(function (it) { svcCount[it.serviceId] = (svcCount[it.serviceId] || 0) + 1; }); });
     var servicesView = s.services.slice().sort(function (a, b) { return a.name.localeCompare(b.name, 'pt-BR'); }).map(function (v) {
       var n = svcCount[v.id] || 0;
       return { name: v.name, priceLabel: self._money(v.price), durationLabel: v.duration ? v.duration + ' min' : 'Duração livre',
@@ -396,10 +412,13 @@ class Component extends DCLogic {
     var profit = revenue - expTotal;
     var bySvc = {};
     doneP.forEach(function (a) {
-      var k = a.serviceId || a.serviceName;
-      var sv = sById[a.serviceId];
-      if (!bySvc[k]) bySvc[k] = { name: sv ? sv.name : (a.serviceName || 'Serviço removido'), count: 0, total: 0 };
-      bySvc[k].count++; bySvc[k].total += Number(a.price) || 0;
+      var its = self._items(a, sById), total = Number(a.price) || 0;
+      var base = its.reduce(function (t, it) { return t + it.price; }, 0);
+      its.forEach(function (it) {
+        var k = it.serviceId || it.name;
+        if (!bySvc[k]) bySvc[k] = { name: it.name, count: 0, total: 0 };
+        bySvc[k].count++; bySvc[k].total += base > 0 ? total * it.price / base : total / its.length;
+      });
     });
     var svcRows = Object.keys(bySvc).map(function (k) { return bySvc[k]; }).sort(function (a, b) { return b.total - a.total; });
     var svcMax = svcRows.length ? svcRows[0].total || 1 : 1;
@@ -432,9 +451,9 @@ class Component extends DCLogic {
       }),
       doneCount: doneP.length === 1 ? '1 atendimento' : doneP.length + ' atendimentos', noDone: doneP.length === 0,
       doneRows: doneP.slice().sort(function (a, b) { return (b.date + b.time).localeCompare(a.date + a.time); }).map(function (a) {
-        var c = cById[a.clientId], sv = sById[a.serviceId], key = 'fin-' + a.id;
+        var c = cById[a.clientId], key = 'fin-' + a.id;
         return { wd: self._wd(a.date), day: self._dm(a.date), time: a.time,
-          client: c ? c.name : (a.clientName || 'Cliente removida'), service: sv ? sv.name : (a.serviceName || 'Serviço removido'),
+          client: c ? c.name : (a.clientName || 'Cliente removida'), service: self._items(a, sById).map(function (it) { return it.name; }).join(' + '),
           price: self._money(a.price),
           undo: function () { self.patchAppt(a.id, { done: false, followed: false }); },
           askDel: function () { self.setState({ confirmDel: key }); },
@@ -521,7 +540,17 @@ class Component extends DCLogic {
       af: s.af, afErr: s.afErr, hasAfErr: !!s.afErr, saveAppt: function () { self.saveAppt(); },
       agendaBlocked: s.clients.length === 0 || s.services.length === 0,
       clientOpts: s.clients.slice().sort(function (a, b) { return a.name.localeCompare(b.name, 'pt-BR'); }).map(function (c) { return { id: c.id, name: c.name }; }),
-      serviceOpts: s.services.map(function (v) { return { id: v.id, label: v.name + ' — ' + self._money(v.price) }; }),
+      serviceOpts: s.services.slice().sort(function (a, b) { return a.name.localeCompare(b.name, 'pt-BR'); }).map(function (v) {
+        var sel = (s.af.serviceIds || []).indexOf(v.id) >= 0;
+        return { id: v.id, label: v.name + ' · ' + self._money(v.price), selected: sel, pressed: sel ? 'true' : 'false',
+          cls: sel ? 'pill pill-on' : 'pill', toggle: function () { on.afToggleService(v.id); } };
+      }),
+      afSelLabel: (function () {
+        var ids = (s.af.serviceIds || []).filter(function (id) { return sById[id]; });
+        if (!ids.length) return 'Toque para escolher um ou mais serviços';
+        var sum = ids.reduce(function (t, id) { return t + (Number(sById[id].price) || 0); }, 0);
+        return (ids.length === 1 ? '1 serviço' : ids.length + ' serviços') + ' · ' + self._money(sum);
+      })(),
       tpl: s.tpl, apptsView: apptsView, noAppts: apptsView.length === 0, agFilters: agFilters, stats: stats,
       apptCountLabel: apptsView.length === 1 ? '1 agendamento' : apptsView.length + ' agendamentos',
 
@@ -674,18 +703,18 @@ function viewAgenda(v) {
               ${v.clientOpts.map((o) => html`<option value=${o.id}>${o.name}</option>`)}
             </select>
           </label>
-          <label class="lbl">Serviço
-            <select class="in" value=${v.af.serviceId} onChange=${v.on.afService}>
-              <option value="">Selecione o serviço</option>
-              ${v.serviceOpts.map((o) => html`<option value=${o.id}>${o.label}</option>`)}
-            </select>
-          </label>
+          <div class="lbl" role="group" aria-label="Serviços">Serviços
+            <div style="display:flex;flex-wrap:wrap;gap:6px">
+              ${v.serviceOpts.map((o) => html`<button type="button" class=${o.cls} aria-pressed=${o.pressed} onClick=${o.toggle}>${o.label}</button>`)}
+            </div>
+            <span class="muted" style="font-size:13px">${v.afSelLabel}</span>
+          </div>
           <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px">
             <label class="lbl">Data<input class="in" type="date" value=${v.af.date} onInput=${v.on.afDate} /></label>
             <label class="lbl">Horário<input class="in" type="time" value=${v.af.time} onInput=${v.on.afTime} /></label>
           </div>
           <label class="lbl">Valor (R$)
-            <input class="in" type="number" min="0" step="0.01" value=${v.af.price} onInput=${v.on.afPrice} placeholder="Preenchido pelo serviço" />
+            <input class="in" type="number" min="0" step="0.01" value=${v.af.price} onInput=${v.on.afPrice} placeholder="Soma dos serviços" />
           </label>
           <label class="lbl">Observações
             <input class="in" value=${v.af.notes} onInput=${v.on.afNotes} placeholder="Opcional" />
