@@ -383,7 +383,7 @@ class Component extends DCLogic {
         when: d === 0 ? 'Hoje' : d === 1 ? 'Amanhã' : 'em ' + d + ' dias',
         whenCls: d === 0 ? 'chip chip-wait' : d <= 7 ? 'chip chip-ok' : 'chip',
         rowCls: d === 0 ? 'row row-hl' : 'row',
-        href: href, sent: sent, canSend: !!href && !sent, noPhone: !href,
+        href: href, sent: sent, canSend: !!href && !sent, canResend: !!href && sent, noPhone: !href,
         send: function () { if (d === 0) self.markBday(c.id); } };
     });
 
@@ -820,6 +820,7 @@ function viewAniversarios(v) {
           </div>
           <span class=${b.whenCls}>${b.when}</span>
           ${b.sent && html`<span class="chip chip-ok">Mensagem enviada</span>`}
+          ${b.canResend && html`<a class="btn btn-line btn-sm" href=${b.href} target="_blank" rel="noopener">${IconWa()} Reenviar</a>`}
           ${b.canSend && html`<a class="btn btn-wa btn-sm" href=${b.href} target="_blank" rel="noopener" onClick=${b.send}>${IconWa()} Enviar parabéns</a>`}
           ${b.noPhone && html`<span class="chip">Sem WhatsApp</span>`}
         </div>`)}
